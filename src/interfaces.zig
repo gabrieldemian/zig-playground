@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 // interfaces define their fn pointer signatures, and implementors
 // will use their respective function pointers when creating the implementation.
 //
-// technique 1:
+// technique 1: implementor creates the interface
 
 const Shape = struct {
     // a "type-erased pointer" to the underlying type:
@@ -32,53 +32,56 @@ const Triangle = struct {
         print("draw from triangle\n", .{});
     }
     // return self as the implementor of Shape.
-    pub fn shape(self: *const Triangle) Shape {
-        return .{
+    pub fn as_shape(self: *const Triangle) Shape {
+        return Shape{
             .ptr = @ptrCast(self),
             .draw_fn = draw,
         };
     }
 };
 
+// technique 2: VTable
+
+// the interface defines it's methods as a VTable,
+// a VTable is just a struct of function pointers.
 const Animal = struct {
-    // pointer to the implementor
     ptr: *const anyopaque,
-    fn make_noise(self: *Animal) void {
-        _ = self;
+    vtable: *const AnimalVTable,
+
+    fn make_noise(self: *const Animal) void {
+        // call the implementor's function with his ptr as `self`.
+        return self.vtable.make_noise(self.ptr);
     }
 };
 
-const Dog = struct {};
+const AnimalVTable = struct {
+    make_noise: *const fn (ptr: *const anyopaque) void,
+};
+
+const Dog = struct {
+    fn make_noise(ptr: *const anyopaque) void {
+        const self: *const Dog = @ptrCast(@alignCast(ptr));
+        _ = self;
+        print("woof\n", .{});
+    }
+
+    // in the Dog file, could also move this `as_animal` to the top-level
+    // to make it evaluate at compile time and reduce 1 function call.
+    pub fn as_animal(self: *const Dog) Animal {
+        return Animal{
+            .ptr = @ptrCast(self),
+            .vtable = &AnimalVTable{ .make_noise = make_noise },
+        };
+    }
+};
 
 pub fn main() void {
     const tr = Triangle{};
-    const sh = tr.shape();
-    // this `draw` is calling `Triangle.draw`
-    sh.draw();
-}
+    tr.as_shape().draw();
 
-// fn init(
-//     pointer: anytype,
-//     comptime draw_fn: fn (ptr: @TypeOf(pointer)) void,
-// ) Shape {
-//     const T = @TypeOf(pointer);
-//     assert(@typeInfo(T) == .pointer); // Must be a pointer
-//     assert(@typeInfo(T).pointer.size == .one); // Must be a single-item pointer
-//     assert(@typeInfo(@typeInfo(T).pointer.child) == .@"struct"); // Must point to a struct
-//     const gen = struct {
-//         fn draw(
-//             ptr: *anyopaque,
-//         ) void {
-//             // cast the alignment of *anyopaque which is 1,
-//             // to the alignment of the underlying type.
-//             // and then cast the *anyopaque pointer to the type.
-//             const self: T = @ptrCast(@alignCast(ptr));
-//             // now it's possible to call the method.
-//             draw_fn(self);
-//         }
-//     };
-//     return Shape{
-//         .ptr = pointer,
-//         .draw_fn = gen.draw,
-//     };
-// }
+    const dog = Dog{};
+    // there is some overhead with vtables:
+    // here, call a function `as_animal` that calls `make_noise`
+    // which follows a pointer to call implementors `make_noise`.
+    dog.as_animal().make_noise();
+}
