@@ -1,5 +1,6 @@
 const std = @import("std");
 const print = std.debug.print;
+const assert = std.debug.assert;
 
 // Zig gives no guarantees about the order of fields and the size of
 // the struct but the fields are guaranteed to be ABI-aligned.
@@ -24,6 +25,7 @@ const Point = struct {
 fn LinkedList(comptime T: type) type {
     return struct {
         pub const Node = struct {
+            // optional values take an ?
             prev: ?*Node,
             next: ?*Node,
             data: T,
@@ -61,6 +63,7 @@ pub fn main() void {
     // slice
     const slice = buf[0..3];
     // const slice = &buf;
+
     print("{s} -> {any}\n", .{ buf, buf });
     print("{s}\n", .{slice});
     const linked = LinkedList(u8);

@@ -1,4 +1,4 @@
 .direnv/
 .git/
 .zig-cache/
-.zig-out/
+zig-out/
