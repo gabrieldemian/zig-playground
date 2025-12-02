@@ -75,6 +75,28 @@ const Dog = struct {
     }
 };
 
+// technique 3: comptime trait-like
+
+pub fn Human(comptime T: type) type {
+    return struct {
+        ptr: *const T,
+        pub fn get_age(self: @This()) u8 {
+            return T.get_age(self.ptr);
+        }
+    };
+}
+
+const Maria = struct {
+    age: u8,
+    human: Human(@This()),
+    pub fn get_age(self: *const Maria) u8 {
+        return self.age;
+    }
+    pub fn as_human(self: *const Maria) Human(Maria) {
+        return Human(Maria){ .ptr = self };
+    }
+};
+
 pub fn main() void {
     const tr = Triangle{};
     tr.as_shape().draw();
@@ -84,4 +106,7 @@ pub fn main() void {
     // here, call a function `as_animal` that calls `make_noise`
     // which follows a pointer to call implementors `make_noise`.
     dog.as_animal().make_noise();
+
+    var maria = Maria{ .age = 23 };
+    print("{d}\n", .{maria.as_human().get_age()});
 }
