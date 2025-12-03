@@ -6,7 +6,8 @@ const assert = std.debug.assert;
 // interfaces define their fn pointer signatures, and implementors
 // will use their respective function pointers when creating the implementation.
 //
-// technique 1: implementor creates the interface
+// technique 1: implementor creates the interface,
+// runtime-based and implementor need to cast the pointer.
 
 const Shape = struct {
     // a "type-erased pointer" to the underlying type:
@@ -83,12 +84,14 @@ pub fn Human(comptime T: type) type {
         pub fn get_age(self: @This()) u8 {
             return T.get_age(self.ptr);
         }
+        pub fn call_age(h: *const Human) void {
+            _ = h;
+        }
     };
 }
 
 const Maria = struct {
     age: u8,
-    human: Human(@This()),
     pub fn get_age(self: *const Maria) u8 {
         return self.age;
     }
@@ -97,7 +100,119 @@ const Maria = struct {
     }
 };
 
+// technique 3: another comptime variation
+// here, it's the interface that returns the interface object,
+// which is not very intuitive.
+
+fn ColorT(comptime Colorable: type) type {
+    return struct {
+        // @This() will be, for example, ColorT(Cyan) at compile time.
+        const Color = @This();
+        // Cyan
+        c: Colorable,
+        fn init(s: Colorable) Color {
+            return Color{
+                .c = s,
+            };
+        }
+        fn rgb(self: Color) [3]u8 {
+            return self.c.rgb();
+        }
+    };
+}
+
+const Cyan = struct {
+    r: u8,
+    g: u8,
+    b: u8,
+    fn rgb(self: Cyan) [3]u8 {
+        return [_]u8{
+            self.r,
+            self.g,
+            self.b,
+        };
+    }
+    // pub fn as_color(self: *const Cyan) [3]u8 {
+    //     return ColorT(Cyan).init(self);
+    // }
+};
+
+// technique 4: another runtime based.
+// in contrast to technique 1, the interface cast the pointer,
+// which is nice because it's easier for implementors.
+const Writer = struct {
+    ptr: *anyopaque,
+    writeAllFn: *const fn (ptr: *anyopaque, data: []const u8) anyerror!void,
+
+    // the point of init is to cast *anyopaque to the implementor's ptr.
+    // `anytype` will make this function comptime and capture the implementor's
+    // type in `T`.
+    fn init(ptr: anytype) Writer {
+        const T = @TypeOf(ptr);
+        const ptr_info = @typeInfo(T);
+
+        if (ptr_info != .pointer) @compileError("ptr must be a pointer");
+        if (ptr_info.pointer.size != .One) @compileError("ptr must be a single item pointer");
+
+        // this struct is needed because in Zig, you can't have
+        // functions inside functions.
+        const gen = struct {
+            pub fn writeAll(pointer: *anyopaque, data: []const u8) anyerror!void {
+                const self: T = @ptrCast(@alignCast(pointer));
+                // return ptr_info.pointer.child.writeAll(self, data);
+                // this can be used to inline the function.
+                return @call(.always_inline, ptr_info.pointer.child.writeAll, .{ self, data });
+            }
+        };
+
+        return Writer{
+            .ptr = ptr,
+            .writeAllFn = gen.writeAll,
+        };
+    }
+
+    pub fn writeAll(self: Writer, data: []const u8) !void {
+        return self.writeAllFn(self.ptr, data);
+    }
+};
+
+const File = struct {
+    fn writeAll(self: *const File, data: []const u8) !void {
+        _ = self;
+        _ = data;
+    }
+    fn writer(self: *File) Writer {
+        return Writer.init(self);
+    }
+};
+
+// technique 5: comptime tagged unions
+// only when you know the implementor's, can't be used as a 3rd party lib.
+
+const Writer2 = union(enum) {
+    file: File2,
+    pub fn writeAll(self: Writer, data: []const u8) void {
+        switch (self) {
+            inline else => |file| return file.writeAll(data),
+        }
+    }
+};
+
+const File2 = struct {
+    pub fn writeAll(self: File2, data: []const u8) void {
+        _ = self;
+        _ = data;
+        print("writeAll\n", .{});
+    }
+};
+
 pub fn main() void {
+    const cyan = Cyan{ .r = 1, .g = 2, .b = 3 };
+    const cyan_color = ColorT(@TypeOf(cyan)).init(cyan);
+    // const cyan_color = cyan.as_color();
+
+    print("cyan_rgb {any}\n", .{cyan_color.rgb()});
+
     const tr = Triangle{};
     tr.as_shape().draw();
 
@@ -107,6 +222,23 @@ pub fn main() void {
     // which follows a pointer to call implementors `make_noise`.
     dog.as_animal().make_noise();
 
-    var maria = Maria{ .age = 23 };
+    const maria = Maria{ .age = 23 };
     print("{d}\n", .{maria.as_human().get_age()});
+
+    const file2 = File2{};
+    const writer2 = Writer2{ .file = file2 };
+    writer2.file.writeAll(&[_]u8{
+        1,
+        2,
+        3,
+    });
 }
+
+// fn ColorTT(comptime T: type) type {
+//     return struct {
+//         c: T,
+//         fn rgb(self: T) [3]u8 {
+//             return self.c.rgb();
+//         }
+//     };
+// }
