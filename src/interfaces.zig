@@ -191,7 +191,7 @@ const File = struct {
 
 const Writer2 = union(enum) {
     file: File2,
-    pub fn writeAll(self: Writer, data: []const u8) void {
+    pub fn writeAll(self: Writer2, data: []const u8) void {
         switch (self) {
             inline else => |file| return file.writeAll(data),
         }
