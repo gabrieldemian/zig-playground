@@ -1,7 +1,8 @@
 const std = @import("std");
 const print = std.debug.print;
 
-// during compilation time, you can use Zig to create your own types
+// Zig uses their own types primitives to build the types of the language,
+// you can use those to build your own types at compile time.
 
 /// Returns an enum given an array of strings
 fn BuildEnum(comptime inputs: []const [:0]const u8) type {
