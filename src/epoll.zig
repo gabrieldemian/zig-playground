@@ -5,8 +5,6 @@ const net = std.net;
 const posix = std.posix;
 const linux = std.os.linux;
 
-var timespec: posix.timespec = .{ .sec = 2, .nsec = 0 };
-
 pub fn main() !void {
     var buffer: [1 << 4]u8 = undefined;
     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
@@ -15,7 +13,6 @@ pub fn main() !void {
     var threaded = Io.Threaded.init(gpa);
     defer threaded.deinit();
     const io = threaded.io();
-    _ = io;
 
     // no flags for this system call
     // `efd` is the file descriptor of this epoll.
@@ -33,7 +30,7 @@ pub fn main() !void {
         try posix.epoll_ctl(efd, linux.EPOLL.CTL_ADD, pipe[0], &event);
     }
 
-    const thread = try std.Thread.spawn(.{}, shutdown, .{pipe[1]});
+    const thread = try std.Thread.spawn(.{}, shutdown, .{ io, pipe[1] });
     thread.detach();
 
     var ready_list: [16]linux.epoll_event = undefined;
@@ -51,7 +48,7 @@ pub fn main() !void {
     }
 }
 
-fn shutdown(signal: posix.socket_t) void {
-    _ = std.posix.system.nanosleep(&timespec, &timespec);
+fn shutdown(io: Io, signal: posix.socket_t) void {
+    io.sleep(.fromSeconds(2), .awake) catch {};
     posix.close(signal);
 }
