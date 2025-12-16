@@ -6,7 +6,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 pub fn main() !void {
-    var buffer: [1 << 4]u8 = undefined;
+    var buffer: [1 << 5]u8 = undefined;
     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
     const gpa = alloc.allocator();
 
@@ -25,7 +25,10 @@ pub fn main() !void {
 
     {
         // monitor one end of the pipe
-        var event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = pipe[0] } };
+        var event = linux.epoll_event{
+            .events = linux.EPOLL.IN,
+            .data = .{ .fd = pipe[0], .my_own_thing = 1 },
+        };
         // register the pipe fd
         try posix.epoll_ctl(efd, linux.EPOLL.CTL_ADD, pipe[0], &event);
     }

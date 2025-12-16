@@ -19,7 +19,7 @@ const Bitfield = packed struct {
 
     pub fn init() Bitfield {
         return Bitfield{
-            .part1 = 1,
+            .part1 = 0x1, // 0b0001
             .flag1 = true,
             .flag2 = false,
             .flag3 = true,
