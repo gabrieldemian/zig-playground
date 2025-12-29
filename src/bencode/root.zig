@@ -28,7 +28,6 @@ pub fn decode(w: *Io.Writer, data: []const u8) !void {
     // which data structure the loop is inside of:
     // i = integer, d = dictionary, etc.
     var inside_of: ?usize = null;
-    var tmp_i: u32 = 0;
     var is_positive = true;
 
     for (data, 0..) |v, i| {
@@ -47,38 +46,57 @@ pub fn decode(w: *Io.Writer, data: []const u8) !void {
                 if (inside_of) |del| {
                     // how much to raise by power of 10
                     var n: usize = i - del - 1;
+                    var start = del + 1;
+                    var tmp_i: i32 = 0;
 
-                    for (data[del + 1 .. i]) |value| {
+                    if (!is_positive) {
+                        start += 1;
+                        n -= 1;
+                    }
+
+                    // const nums: [*]u8 = @ptrCast(@alignCast(@constCast(
+                    //     data[start..i].ptr)));
+                    // _ = nums;
+
+                    for (data[start..i]) |value| {
+                        // print("c: {c}\n", .{value});
                         n -= 1;
                         tmp_i += @intCast((value - '0') * POW10_TABLE[n]);
                     }
 
+                    if (!is_positive) {
+                        tmp_i = -tmp_i;
+                    }
+
                     inside_of = null;
-                    print("mask: {d}\n", .{tmp_i});
                     const a: []u8 = std.mem.asBytes(&tmp_i);
                     _ = try w.write(a);
+                    is_positive = true;
                 }
-                is_positive = true;
             },
-            // '0'...'9' => {
-            //     if (inside_of == null) {
-            //         return Error.MalformedBuffer;
-            //     }
-            //     print("writing {d}\n", .{v - '0'});
-            // },
             else => {},
         }
     }
 }
 
-test "decode_int" {
-    const encoded = "i253e";
-    // const encoded = "i12345e";
-    var buffer: [8]u8 = undefined;
+const expect = std.testing.expect;
+var buffer: [8]u8 = undefined;
+
+test "decode_u8" {
+    const encoded = "i50e";
     var w = std.Io.Writer.fixed(&buffer);
     try decode(&w, encoded);
-    print("{any}\n", .{buffer});
-    print("{d}\n", .{buffer[0]});
-    const num: *u32 = @ptrCast(@alignCast(buffer[0..2].ptr));
-    print("{d}\n", .{num.*});
+    // print("{any}\n", .{buffer});
+    // print("{d}\n", .{buffer[0]});
+    const num: *u8 = @ptrCast(@alignCast(buffer[0..1].ptr));
+    try expect(num.* == 50);
+    // print("{d}\n", .{num.*});
+}
+
+test "decode_i8" {
+    const encoded = "i-50e";
+    var w = std.Io.Writer.fixed(&buffer);
+    try decode(&w, encoded);
+    const num: *i8 = @ptrCast(@alignCast(buffer[0..1].ptr));
+    try expect(num.* == -50);
 }
