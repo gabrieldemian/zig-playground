@@ -132,12 +132,10 @@ fn submit_to_sq(
     sqe.opcode = op;
     sqe.fd = fd;
     sqe.addr = @intCast(@intFromPtr(&buff));
+    sqe.len = buff.len;
 
     if (op == .READ) {
         @memset(&buff, 0);
-        sqe.len = buff.len;
-    } else {
-        sqe.len = buff.len;
     }
 
     sring.array[index] = index;
