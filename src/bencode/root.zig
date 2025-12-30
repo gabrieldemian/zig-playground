@@ -3,19 +3,6 @@ const Io = std.Io;
 const print = std.debug.print;
 const assert = std.debug.assert;
 
-const POW10_TABLE = [_]u32{
-    1, // 10^0
-    10, // 10^1 = (1<<3)+(1<<1)
-    100, // 10^2
-    1000, // 10^3
-    10000, // 10^4
-    100000, // 10^5
-    1000000, // 10^6
-    10000000, // 10^7
-    100000000, // 10^8
-    1000000000, // 10^9
-};
-
 const MyData = struct {
     myint: u8,
 };
@@ -24,55 +11,49 @@ pub const Error = error{
     MalformedBuffer,
 };
 
+const State = enum {
+    None,
+    Integer,
+    List,
+    Dict,
+    StringLen,
+};
+
+const MAX_INT = i32;
+
 pub fn decode(w: *Io.Writer, data: []const u8) !void {
-    // which data structure the loop is inside of:
-    // i = integer, d = dictionary, etc.
-    var inside_of: ?usize = null;
+    // which data structure the loop is inside of.
+    var state: State = .None;
+    var integer_value: MAX_INT = 0;
     var is_positive = true;
 
-    for (data, 0..) |v, i| {
-        switch (v) {
-            'i', 'd', 'l' => {
-                inside_of = i;
-            },
-            '-' => {
-                if (inside_of) |del| {
-                    if (data[del] == 'i') {
-                        is_positive = false;
-                    }
-                }
-            },
-            'e' => {
-                if (inside_of) |del| {
-                    // how much to raise by power of 10
-                    var n: usize = i - del - 1;
-                    var start = del + 1;
-                    var tmp_i: i32 = 0;
-
-                    if (!is_positive) {
-                        start += 1;
-                        n -= 1;
-                    }
-
-                    // const nums: [*]u8 = @ptrCast(@alignCast(@constCast(
-                    //     data[start..i].ptr)));
-                    // _ = nums;
-
-                    for (data[start..i]) |value| {
-                        // print("c: {c}\n", .{value});
-                        n -= 1;
-                        tmp_i += @intCast((value - '0') * POW10_TABLE[n]);
-                    }
-
-                    if (!is_positive) {
-                        tmp_i = -tmp_i;
-                    }
-
-                    inside_of = null;
-                    const a: []u8 = std.mem.asBytes(&tmp_i);
-                    _ = try w.write(a);
+    for (data) |v| {
+        switch (state) {
+            .None => switch (v) {
+                'i' => {
+                    state = .Integer;
                     is_positive = true;
-                }
+                    integer_value = 0;
+                },
+                else => {},
+            },
+            .Integer => switch (v) {
+                '-' => {
+                    is_positive = false;
+                },
+                '0'...'9' => {
+                    const digit = v - '0';
+                    if (integer_value > @divFloor((std.math.maxInt(MAX_INT) - @as(MAX_INT, digit)), 10)) {
+                        return error.Overflow;
+                    }
+                    integer_value = integer_value * 10 + digit;
+                },
+                'e' => {
+                    const value = if (is_positive) integer_value else -integer_value;
+                    const a: []const u8 = std.mem.asBytes(&value);
+                    _ = try w.write(a);
+                },
+                else => {},
             },
             else => {},
         }
@@ -86,11 +67,24 @@ test "decode_u8" {
     const encoded = "i50e";
     var w = std.Io.Writer.fixed(&buffer);
     try decode(&w, encoded);
-    // print("{any}\n", .{buffer});
-    // print("{d}\n", .{buffer[0]});
     const num: *u8 = @ptrCast(@alignCast(buffer[0..1].ptr));
     try expect(num.* == 50);
-    // print("{d}\n", .{num.*});
+}
+
+test "decode_u16" {
+    const encoded = "i65535e";
+    var w = std.Io.Writer.fixed(&buffer);
+    try decode(&w, encoded);
+    const num: *u16 = @ptrCast(@alignCast(buffer[0..2].ptr));
+    try expect(num.* == 65535);
+}
+
+test "decode_i16" {
+    const encoded = "i-32767e";
+    var w = std.Io.Writer.fixed(&buffer);
+    try decode(&w, encoded);
+    const num: *i16 = @ptrCast(@alignCast(buffer[0..2].ptr));
+    try expect(num.* == -32767);
 }
 
 test "decode_i8" {
