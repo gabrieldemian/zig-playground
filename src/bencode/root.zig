@@ -14,6 +14,7 @@ pub const Error = error{
 const State = enum {
     None,
     Integer,
+    NegInteger,
     List,
     Dict,
     StringLen,
@@ -25,34 +26,28 @@ pub fn decode(w: *Io.Writer, data: []const u8) !void {
     // which data structure the loop is inside of.
     var state: State = .None;
     var integer_value: MAX_INT = 0;
-    var is_positive = true;
 
     for (data) |v| {
         switch (state) {
             .None => switch (v) {
                 'i' => {
                     state = .Integer;
-                    is_positive = true;
                     integer_value = 0;
                 },
                 else => {},
             },
             .Integer => switch (v) {
                 '-' => {
-                    is_positive = false;
+                    state = .NegInteger;
                 },
-                '0'...'9' => {
-                    const digit = v - '0';
-                    if (integer_value > @divFloor((std.math.maxInt(MAX_INT) - @as(MAX_INT, digit)), 10)) {
-                        return error.Overflow;
-                    }
-                    integer_value = integer_value * 10 + digit;
-                },
-                'e' => {
-                    const value = if (is_positive) integer_value else -integer_value;
-                    const a: []const u8 = std.mem.asBytes(&value);
-                    _ = try w.write(a);
-                },
+                // todo: handle int overflow
+                '0'...'9' => integer_value = integer_value * 10 + v - '0',
+                'e' => _ = try w.write(std.mem.asBytes(&integer_value)),
+                else => {},
+            },
+            .NegInteger => switch (v) {
+                '0'...'9' => integer_value = integer_value * 10 + v - '0',
+                'e' => _ = try w.write(std.mem.asBytes(&-integer_value)),
                 else => {},
             },
             else => {},
