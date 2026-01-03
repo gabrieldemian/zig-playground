@@ -90,7 +90,6 @@ pub fn decode_int(
     comptime T: type,
     data: []const u8,
 ) !T {
-    @setRuntimeSafety(false);
     const Int = @typeInfo(T).int;
 
     if (data.len < 3) {
@@ -113,34 +112,10 @@ pub fn decode_int(
 
     // -0 is not valid
     if (is_negative and data[2] == '0') {
-        return Error.UnexpectedSign;
+        return Error.LeadingZero;
     }
 
-    var integer_value: T = 0;
-
-    for (data) |v| {
-        switch (v) {
-            'i', '-' => {},
-            '0'...'9' => {
-                const vv: T = @intCast(v - '0');
-                const m = @mulWithOverflow(integer_value, 10);
-                if (m[1] != 0) return error.Overflow;
-
-                if (!is_negative) {
-                    const add = @addWithOverflow(m[0], vv);
-                    if (add[1] != 0) return error.Overflow;
-                    integer_value = add[0];
-                } else {
-                    const sub = @subWithOverflow(m[0], vv);
-                    if (sub[1] != 0) return error.Overflow;
-                    integer_value = sub[0];
-                }
-            },
-            'e' => return integer_value,
-            else => return Error.FoundNonInt,
-        }
-    }
-    unreachable;
+    return try std.fmt.parseInt(T, data[1..data.len - 1], 10);
 }
 
 const expect = std.testing.expect;
@@ -262,7 +237,7 @@ test "leading_zero_2" {
     const encoded = "i-0e";
     var w = std.Io.Writer.fixed(&buffer);
     const err = decode(i8, &w, encoded);
-    try expect(err == Error.UnexpectedSign);
+    try expect(err == Error.LeadingZero);
 }
 
 test "overflow" {
@@ -283,7 +258,7 @@ test "non_int" {
     const encoded = "i12#e";
     var w = std.Io.Writer.fixed(&buffer);
     const err = decode(i8, &w, encoded);
-    try expect(err == Error.FoundNonInt);
+    try expect(err == error.InvalidCharacter);
 }
 
 test "malformed" {
