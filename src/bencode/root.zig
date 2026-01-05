@@ -31,11 +31,8 @@ pub fn decode(
     const info = @typeInfo(T);
 
     return switch (info) {
-        inline .array => |arr| {
-            const r = try decode_arr(arr, data);
-            _ = try w.write(std.mem.asBytes(&r));
-        },
-        inline .int => {
+        inline .int => |int| {
+            _ = int;
             const r = try decode_int(T, data);
             _ = try w.write(std.mem.asBytes(&r));
         },
@@ -63,8 +60,43 @@ pub fn decode(
                 @field(val, f.name) = return decode(f.type, w, data);
             }
         },
+        inline .array => |arr| {
+            const r = try decode_arr(arr, T, data);
+            _ = try w.write(std.mem.asBytes(&r));
+        },
         else => return Error.NotSupported,
     };
+}
+
+/// Lists are encoded as `l<elements>e`.
+/// l7:bencode3:fooe
+pub fn decode_arr(
+    comptime Arr: std.builtin.Type.Array,
+    comptime T: type,
+    /// string
+    data: []const u8,
+) !T {
+    _ = Arr;
+    if (data.len < 3) {
+        return Error.MalformedBuffer;
+    }
+
+    if (data[0] != 'l' or data[data.len - 1] != 'e') {
+        return Error.MalformedBuffer;
+    }
+
+    // empty list
+    if (std.mem.eql(u8, data, "le")) {
+        const r: T = std.mem.zeroes(T);
+        return r;
+    }
+
+    const val: T = undefined;
+
+    // inline for (std.meta.fields(T)) |f| {
+    // }
+
+    return val;
 }
 
 /// Decode a byte str, encoded as `<length>:<contents>`.
@@ -86,41 +118,13 @@ pub fn decode_str(data: []const u8) ![]const u8 {
 
     const colon = std.mem.find(u8, data, ":") orelse return Error.MalformedBuffer;
     const len = try std.fmt.parseInt(usize, data[0..colon], 10);
-    const str = data[colon + 1 ..];
-
-    if (len != str.len) {
+    const str = data[colon + 1 ..colon + 1 + len];
+    // std.debug.print("str: {s}\n", .{str});
+    if (data[colon + 1..].len > str.len) {
         return Error.WrongLen;
     }
 
     return str;
-}
-
-/// Lists are encoded as `l<elements>e`.
-pub fn decode_arr(
-    comptime T: type,
-    data: []const u8,
-) !T {
-    if (data.len < 3) {
-        return Error.MalformedBuffer;
-    }
-
-    if (data[0] != 'l' or data[data.len - 1] != 'e') {
-        return Error.MalformedBuffer;
-    }
-
-    // empty list
-    if (std.mem.eql(u8, data, "le")) {
-        return "";
-    }
-
-    const val: T = undefined;
-
-    inline for (std.meta.Elem(T)) |f| {
-        _ = f;
-        // @field(val, f.name) = return decode(f.type, w, data);
-    }
-
-    return val;
 }
 
 /// Decode an integer, encoded as `i<base10 integer>e`.
@@ -160,11 +164,19 @@ pub fn decode_int(
 const expect = std.testing.expect;
 var buffer: [8]u8 = undefined;
 
+// test "arr" {
+//     const encoded = "li2ee";
+//     const T = [1]u8;
+//     var w = std.Io.Writer.fixed(&buffer);
+//     try decode(T, &w, encoded);
+//     std.debug.print("my_arr {any}\n", .{buffer});
+//     try expect(buffer[0] == 2);
+// }
+
 test "struct" {
     const encoded = "i4e";
     var w = std.Io.Writer.fixed(&buffer);
     try decode(MyData, &w, encoded);
-    std.debug.print("my_data {any}\n", .{buffer});
     try expect(buffer[0] == 4);
 }
 
