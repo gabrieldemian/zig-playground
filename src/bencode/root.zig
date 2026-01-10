@@ -62,7 +62,6 @@ fn decode_dict(
         return Error.MalformedBuffer;
     }
 
-    var level: usize = 1;
     var dict: T = undefined;
 
     inline for (Str.fields) |f| {
@@ -75,17 +74,10 @@ fn decode_dict(
         // i123e...
         reader.toss(1);
 
-        switch (reader.buffer[reader.seek]) {
-            inline 'l' => {
-                level += 1;
-            },
-            else => {},
-        }
-
         @field(dict, f.name) = try decode(f.type, reader);
     }
 
-    reader.toss(level);
+    reader.toss(1);
     return dict;
 }
 
@@ -122,6 +114,7 @@ fn decode_arr(
         arr[i] = v;
     }
 
+    reader.toss(1);
     return arr;
 }
 
@@ -263,7 +256,6 @@ test "dict_4" {
     const encoded = "d3:fooi3e3:bari321e3:dicd3:fooi6ee3:zip7:avocado3:arrli1ei2eee";
     var r = Reader.fixed(encoded);
     const s = try decode(MyDict, &r);
-    print("{d} {s}\n", .{ r.seek, r.buffer[r.seek..] });
     try expect(s.foo == 3);
     try expect(s.bar == 321);
     try expect(s.dic.foo == 6);
@@ -290,6 +282,7 @@ test "arr_int" {
     const s = try decode([1]u8, &r);
     try expect(s[0] == 22);
     try expect(s.len == 1);
+    try expect(r.seek == encoded.len - 1);
 }
 
 test "arr_int_2" {
@@ -299,6 +292,7 @@ test "arr_int_2" {
     try expect(s[0] == 22);
     try expect(s[1] == 34);
     try expect(s.len == 2);
+    try expect(r.seek == encoded.len - 1);
 }
 
 test "arr_int_3" {
@@ -308,6 +302,27 @@ test "arr_int_3" {
     try expect(s[0] == 22);
     try expect(s[1] == 34);
     try expect(s.len == 2);
+    try expect(r.seek == encoded.len - 1);
+}
+
+test "arr_int_4" {
+    const encoded = "lli1ei2ei3eeli4ei5ei6eeli7ei8ei9eee";
+    var r = Reader.fixed(encoded);
+    const s = try decode([3][3]u8, &r);
+    // print("arr: {d} {s}\n", .{ r.seek, r.buffer[r.seek..] });
+    try expect(s[0][0] == 1);
+    try expect(s[0][1] == 2);
+    try expect(s[0][2] == 3);
+    try expect(s[1][0] == 4);
+    try expect(s[1][1] == 5);
+    try expect(s[1][2] == 6);
+    try expect(s[2][0] == 7);
+    try expect(s[2][1] == 8);
+    try expect(s[2][2] == 9);
+    try expect(s[0].len == 3);
+    try expect(s[1].len == 3);
+    try expect(s[2].len == 3);
+    try expect(r.seek == encoded.len - 1);
 }
 
 test "arr_str" {
@@ -316,6 +331,7 @@ test "arr_str" {
     const s = try decode([1][]const u8, &r);
     try expect(std.mem.eql(u8, s[0], "vvv"));
     try expect(s.len == 1);
+    try expect(r.seek == encoded.len - 1);
 }
 
 test "arr_str_2" {
@@ -325,6 +341,7 @@ test "arr_str_2" {
     try expect(std.mem.eql(u8, s[0], "vvv"));
     try expect(std.mem.eql(u8, s[1], "foo"));
     try expect(s.len == 2);
+    try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_str" {
