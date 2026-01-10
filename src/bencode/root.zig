@@ -56,11 +56,9 @@ fn decode_dict(
         return Error.Empty;
     }
 
-    if (data.len < 3) {
-        return Error.MalformedBuffer;
-    }
-
-    if (data[0] != 'd' or data[data.len - 1] != 'e') {
+    if (data.len < 3 or
+        (data[0] != 'd' or data[data.len - 1] != 'e'))
+    {
         return Error.MalformedBuffer;
     }
 
@@ -78,7 +76,7 @@ fn decode_dict(
         reader.toss(1);
 
         switch (reader.buffer[reader.seek]) {
-            inline 'd', 'l' => {
+            inline 'l' => {
                 level += 1;
             },
             else => {},
@@ -245,6 +243,30 @@ test "dict_3" {
     const s = try decode(MyDict, &r);
     try expect(s.foo == 3);
     try expect(s.bar == 321);
+    try expect(std.mem.eql(u8, s.zip, "avocado"));
+    try expect(s.arr[0] == 1);
+    try expect(s.arr[1] == 2);
+    try expect(r.seek == encoded.len - 1);
+}
+
+test "dict_4" {
+    const MyDict2 = struct {
+        foo: u8,
+    };
+    const MyDict = struct {
+        foo: u8,
+        bar: u32,
+        dic: MyDict2,
+        zip: []const u8,
+        arr: [2]u8,
+    };
+    const encoded = "d3:fooi3e3:bari321e3:dicd3:fooi6ee3:zip7:avocado3:arrli1ei2eee";
+    var r = Reader.fixed(encoded);
+    const s = try decode(MyDict, &r);
+    print("{d} {s}\n", .{ r.seek, r.buffer[r.seek..] });
+    try expect(s.foo == 3);
+    try expect(s.bar == 321);
+    try expect(s.dic.foo == 6);
     try expect(std.mem.eql(u8, s.zip, "avocado"));
     try expect(s.arr[0] == 1);
     try expect(s.arr[1] == 2);
