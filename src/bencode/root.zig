@@ -6,10 +6,6 @@ const Writer = std.Io.Writer;
 
 const empty_str = "";
 
-pub const MyData = struct {
-    myint: u8,
-};
-
 pub const Error = error{
     MalformedBuffer,
     WrongType,
@@ -30,29 +26,69 @@ pub fn decode(
     comptime T: type,
     reader: *Reader,
 ) !T {
-    const info = @typeInfo(T);
-
-    return switch (info) {
+    return switch (@typeInfo(T)) {
         inline .int => try decode_int(T, reader),
         inline .pointer => |p| {
-            // the only pointer supported is to an []u8,
+            // []u8 will fall in this branch which is considered a string.
             if (p.child != u8) {
                 return Error.NotSupported;
             }
             return try decode_str(reader);
         },
-        // inline .@"struct" => {
-        //     // initialize the struct with zeroes, loop over the fields,
-        //     // and call `decode` recursively with the field type.
-        //     var val: T = undefined;
-        //     inline for (std.meta.fields(T)) |f| {
-        //         @field(val, f.name) = return decode(f.type, reader);
-        //     }
-        //     return val;
-        // },
+        inline .@"struct" => |str| return try decode_dict(T, str, reader),
         inline .array => |arr| try decode_arr(arr, reader),
         inline else => Error.NotSupported,
     };
+}
+
+/// Dicts are encoded as `d<str><val>e`.
+/// For example: `d3:fooi2ee`.
+fn decode_dict(
+    comptime T: type,
+    comptime Str: std.builtin.Type.Struct,
+    reader: *Reader,
+) !T {
+    const data = reader.buffer[reader.seek..];
+
+    // empty dict
+    if (std.mem.eql(u8, data, "de")) {
+        reader.toss(1);
+        return Error.Empty;
+    }
+
+    if (data.len < 3) {
+        return Error.MalformedBuffer;
+    }
+
+    if (data[0] != 'd' or data[data.len - 1] != 'e') {
+        return Error.MalformedBuffer;
+    }
+
+    var level: usize = 1;
+    var dict: T = undefined;
+
+    inline for (Str.fields) |f| {
+        // enter the str
+        // 3:foo...
+        reader.toss(1);
+        _ = try decode_str(reader);
+
+        // enter the next data structure
+        // i123e...
+        reader.toss(1);
+
+        switch (reader.buffer[reader.seek]) {
+            inline 'd', 'l' => {
+                level += 1;
+            },
+            else => {},
+        }
+
+        @field(dict, f.name) = try decode(f.type, reader);
+    }
+
+    reader.toss(level);
+    return dict;
 }
 
 /// Lists are encoded as `l<elements>e`.
@@ -110,7 +146,6 @@ fn decode_str(reader: *Reader) ![]const u8 {
         reader.buffer[reader.seek..],
         ":",
     ) orelse return Error.MalformedBuffer;
-
     const len_slice = reader.buffer[reader.seek .. reader.seek + colon];
     const len = try std.fmt.parseInt(usize, len_slice, 10);
     const str =
@@ -171,7 +206,61 @@ fn decode_int(
 }
 
 const expect = std.testing.expect;
-var buffer: [10]u8 = undefined;
+
+test "dict" {
+    const MyDict = struct {
+        foo: u8,
+    };
+    const encoded = "d3:fooi3ee";
+    var r = Reader.fixed(encoded);
+    const s = try decode(MyDict, &r);
+    try expect(s.foo == 3);
+    try expect(r.seek == encoded.len - 1);
+}
+
+test "dict_2" {
+    const MyDict = struct {
+        foo: u8,
+        bar: u32,
+        zip: []const u8,
+    };
+    const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
+    var r = Reader.fixed(encoded);
+    const s = try decode(MyDict, &r);
+    try expect(s.foo == 3);
+    try expect(s.bar == 321);
+    try expect(std.mem.eql(u8, s.zip, "avocado"));
+    try expect(r.seek == encoded.len - 1);
+}
+
+test "dict_3" {
+    const MyDict = struct {
+        foo: u8,
+        bar: u32,
+        zip: []const u8,
+        arr: [2]u8,
+    };
+    const encoded = "d3:fooi3e3:bari321e3:zip7:avocado3:arrli1ei2eee";
+    var r = Reader.fixed(encoded);
+    const s = try decode(MyDict, &r);
+    try expect(s.foo == 3);
+    try expect(s.bar == 321);
+    try expect(std.mem.eql(u8, s.zip, "avocado"));
+    try expect(s.arr[0] == 1);
+    try expect(s.arr[1] == 2);
+    try expect(r.seek == encoded.len - 1);
+}
+
+// test "dict_tuple" {
+//     const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
+//     var r = Reader.fixed(encoded);
+//     const T = @Tuple(&.{ u8, u32, []const u8 });
+//     const s: T = try decode(T, &r);
+//     try expect(s[0] == 3);
+//     try expect(s[1] == 321);
+//     try expect(std.mem.eql(u8, s[2], "avocado"));
+//     try expect(r.seek == encoded.len - 1);
+// }
 
 test "arr_int" {
     const encoded = "li22ee";
@@ -215,14 +304,6 @@ test "arr_str_2" {
     try expect(std.mem.eql(u8, s[1], "foo"));
     try expect(s.len == 2);
 }
-
-// test "struct" {
-//     const encoded = "i4e";
-//     var r = Reader.fixed(encoded);
-//     const s = try decode(MyData, &r);
-//     try expect(s.myint == 4);
-//     try expect(r.seek == encoded.len - 1);
-// }
 
 test "decode_str" {
     const encoded = "3:hih";
