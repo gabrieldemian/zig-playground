@@ -4,21 +4,14 @@ const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 
-const empty_str = "";
+const EMPTY_STR = "";
 
 pub const Error = error{
     MalformedBuffer,
-    WrongType,
     Empty,
-
-    FoundNonInt,
     UnexpectedSign,
     NotSupported,
     LeadingZero,
-
-    NoLen,
-    NoNegative,
-    WrongLen,
 };
 
 pub fn decode(
@@ -28,6 +21,7 @@ pub fn decode(
 ) !T {
     return switch (@typeInfo(T)) {
         inline .int => try decode_int(T, reader),
+        inline .@"enum" => |en| @enumFromInt(try decode_int(en.tag_type, reader)),
         inline .pointer => |p| {
             // []u8 will fall in this branch which is considered a string.
             if (p.child != u8) {
@@ -35,7 +29,7 @@ pub fn decode(
             }
             return try decode_str(reader);
         },
-        inline .@"struct" => |str| return try decode_dict(T, str, reader),
+        inline .@"struct" => |str| try decode_dict(T, str, reader),
         inline .array => |arr| try decode_arr(arr, reader),
         inline else => Error.NotSupported,
     };
@@ -65,13 +59,10 @@ fn decode_dict(
     var dict: T = undefined;
 
     inline for (Str.fields) |f| {
-        // enter the str
-        // 3:foo...
+        // enter the field str `3:foo...`
         reader.toss(1);
         _ = try decode_str(reader);
-
-        // enter the next data structure
-        // i123e...
+        // enter the next data structure `i2e...`
         reader.toss(1);
 
         @field(dict, f.name) = try decode(f.type, reader);
@@ -129,7 +120,7 @@ fn decode_str(reader: *Reader) ![]const u8 {
     // empty string
     if (std.mem.eql(u8, reader.buffer[reader.seek..], "0:")) {
         reader.toss(1);
-        return empty_str;
+        return EMPTY_STR;
     }
 
     const colon = std.mem.find(
@@ -198,6 +189,19 @@ fn decode_int(
 
 const expect = std.testing.expect;
 
+test "enum" {
+    const MyEnum = enum(u8) {
+        Core,
+        ExtHandshake,
+        Metainfo,
+    };
+    const encoded = "i1e";
+    var r = Reader.fixed(encoded);
+    const num = try decode(MyEnum, &r);
+    try expect(num == .ExtHandshake);
+    try expect(r.seek == encoded.len - 1);
+}
+
 test "dict" {
     const MyDict = struct {
         foo: u8,
@@ -265,16 +269,16 @@ test "dict_4" {
     try expect(r.seek == encoded.len - 1);
 }
 
-// test "dict_tuple" {
-//     const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
-//     var r = Reader.fixed(encoded);
-//     const T = @Tuple(&.{ u8, u32, []const u8 });
-//     const s: T = try decode(T, &r);
-//     try expect(s[0] == 3);
-//     try expect(s[1] == 321);
-//     try expect(std.mem.eql(u8, s[2], "avocado"));
-//     try expect(r.seek == encoded.len - 1);
-// }
+test "dict_tuple" {
+    const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
+    var r = Reader.fixed(encoded);
+    const T = @Tuple(&.{ u8, u32, []const u8 });
+    const s: T = try decode(T, &r);
+    try expect(s[0] == 3);
+    try expect(s[1] == 321);
+    try expect(std.mem.eql(u8, s[2], "avocado"));
+    try expect(r.seek == encoded.len - 1);
+}
 
 test "arr_int" {
     const encoded = "li22ee";
