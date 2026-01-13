@@ -12,7 +12,36 @@ pub const Error = error{
     UnexpectedSign,
     NotSupported,
     LeadingZero,
+    MissingColon,
 };
+
+fn encode(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+    return switch (@typeInfo(@TypeOf(value))) {
+        inline .int => try encode_int(value, alloc),
+        inline else => Error.NotSupported,
+    };
+}
+
+fn encode_int(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+    var size: usize = 0;
+    var v = @abs(value);
+    while (v > 0) {
+        size += 1;
+        v = @divTrunc(v, 10);
+    }
+    var len = 2 + size;
+    if (value < 0) {
+        len += 1;
+    }
+    const buf = try alloc.alloc(u8, len);
+    // print("{d} {d}\n", .{size, buf.len});
+    buf[0] = 'i';
+    var w = Writer.fixed(buf[1 .. buf.len - 1]);
+    try w.printInt(value, 10, .lower, .{});
+    buf[buf.len - 1] = 'e';
+
+    return buf;
+}
 
 pub fn decode(
     /// The type to decode `data` into.
@@ -127,7 +156,7 @@ fn decode_str(reader: *Reader) ![]const u8 {
         u8,
         reader.buffer[reader.seek..],
         ":",
-    ) orelse return Error.MalformedBuffer;
+    ) orelse return Error.MissingColon;
     const len_slice = reader.buffer[reader.seek .. reader.seek + colon];
     const len = try std.fmt.parseInt(usize, len_slice, 10);
     const str =
@@ -188,6 +217,33 @@ fn decode_int(
 }
 
 const expect = std.testing.expect;
+
+test "encode_int" {
+    const v: u8 = 123;
+    var buffer: [5]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(v, &gpa);
+    try expect(std.mem.eql(u8, r, "i123e"));
+}
+
+test "encode_int_2" {
+    const v: i8 = 30;
+    var buffer: [4]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(v, &gpa);
+    try expect(std.mem.eql(u8, r, "i30e"));
+}
+
+test "encode_int_3" {
+    const v: i8 = -30;
+    var buffer: [5]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(v, &gpa);
+    try expect(std.mem.eql(u8, r, "i-30e"));
+}
 
 test "enum" {
     const MyEnum = enum(u8) {
@@ -380,25 +436,6 @@ test "decode_str_2" {
     try expect(r.seek == encoded.len - 1);
 }
 
-// Test str errors
-
-test "str_wrong_len" {
-    // should ignore all the rest of the string
-    const encoded = "2:higarbage";
-    var r = Reader.fixed(encoded);
-    const s = try decode([]const u8, &r);
-    try expect(std.mem.eql(u8, s, "hi"));
-    try expect(r.seek == 3);
-}
-//
-test "str_no_len" {
-    const encoded = ":hih";
-    var r = Reader.fixed(encoded);
-    const err = decode([]const u8, &r);
-    try expect(err == error.InvalidCharacter);
-    try expect(r.seek == 0);
-}
-
 // Test numbers not close to the max
 test "decode_u8" {
     const encoded = "i50e";
@@ -507,10 +544,35 @@ test "non_int" {
     try expect(r.seek == 0);
 }
 
-test "malformed" {
+test "int_missing_e" {
     const encoded = "i12";
     var r = Reader.fixed(encoded);
     const err = decode(i8, &r);
     try expect(err == Error.MalformedBuffer);
+    try expect(r.seek == 0);
+}
+
+test "str_wrong_len" {
+    // should ignore all the rest of the string
+    const encoded = "2:higarbage";
+    var r = Reader.fixed(encoded);
+    const s = try decode([]const u8, &r);
+    try expect(std.mem.eql(u8, s, "hi"));
+    try expect(r.seek == 3);
+}
+
+test "str_no_len" {
+    const encoded = ":hih";
+    var r = Reader.fixed(encoded);
+    const err = decode([]const u8, &r);
+    try expect(err == error.InvalidCharacter);
+    try expect(r.seek == 0);
+}
+
+test "str_missing_colon" {
+    const encoded = "10hihhihhihh";
+    var r = Reader.fixed(encoded);
+    const err = decode([]const u8, &r);
+    try expect(err == Error.MissingColon);
     try expect(r.seek == 0);
 }
