@@ -19,6 +19,7 @@ fn encode(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
     return switch (@typeInfo(@TypeOf(value))) {
         inline .int => try encode_int(value, alloc),
         inline .@"enum" => try encode_int(@intFromEnum(value), alloc),
+        inline .@"struct" => try encode_dict(value, alloc),
         inline .array => |arr| {
             if (arr.child != u8) return Error.NotSupported;
             return try encode_str(&value, alloc);
@@ -31,29 +32,31 @@ fn encode(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
     };
 }
 
-fn encode_str(value: []const u8, alloc: *std.mem.Allocator) ![]u8 {
-    var enc_size: usize = 0;
-    var v = value.len;
-    while (v > 0) {
-        enc_size += 1;
-        v = @divTrunc(v, 10);
+fn encode_dict(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+    const Str = @typeInfo(value).@"struct";
+    const buf = try alloc.alloc(u8, @sizeOf(value) * 2);
+    var w = Writer.fixed(buf);
+    _ = &w;
+
+    inline for (Str.fields) |f| {
+        _ = try encode(f.name, alloc);
+        _ = try encode(f.value, alloc);
     }
+}
+
+fn encode_str(value: []const u8, alloc: *std.mem.Allocator) ![]u8 {
+    const enc_size = get_enc_size(value.len);
     const buf_len = enc_size + 1 + value.len;
     const buf = try alloc.alloc(u8, buf_len);
     var w = Writer.fixed(buf);
     try w.printIntAny(value.len, 10, .lower, .{});
     buf[enc_size] = ':';
-    @memcpy(buf[enc_size + 1..], value);
+    @memcpy(buf[enc_size + 1 ..], value);
     return buf;
 }
 
 fn encode_int(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
-    var size: usize = 0;
-    var v = @abs(value);
-    while (v > 0) {
-        size += 1;
-        v = @divTrunc(v, 10);
-    }
+    const size = get_enc_size(@abs(value));
     var buf_len = 2 + size;
     if (value < 0) {
         buf_len += 1;
@@ -79,7 +82,7 @@ pub fn decode(
             if (p.child != u8) return Error.NotSupported;
             return try decode_str(reader);
         },
-        inline .@"struct" => |str| try decode_dict(T, str, reader),
+        inline .@"struct" => try decode_dict(T, reader),
         inline .array => |arr| try decode_arr(arr, reader),
         inline else => Error.NotSupported,
     };
@@ -87,11 +90,7 @@ pub fn decode(
 
 /// Dicts are encoded as `d<str><val>e`.
 /// For example: `d3:fooi2ee`.
-fn decode_dict(
-    comptime T: type,
-    comptime Str: std.builtin.Type.Struct,
-    reader: *Reader,
-) !T {
+fn decode_dict(comptime T: type, reader: *Reader) !T {
     const data = reader.buffer[reader.seek..];
 
     // empty dict
@@ -108,7 +107,7 @@ fn decode_dict(
 
     var dict: T = undefined;
 
-    inline for (Str.fields) |f| {
+    inline for (@typeInfo(T).@"struct".fields) |f| {
         // enter the field str `3:foo...`
         reader.toss(1);
         _ = try decode_str(reader);
@@ -237,7 +236,34 @@ fn decode_int(
     return result;
 }
 
+/// Return the number of digits of a number.
+/// Example:
+/// ```zig
+/// const n = get_enc_size(123);
+/// try std.testing.expect(n == 3);
+/// ```
+fn get_enc_size(n: anytype) usize {
+    var enc_size: usize = 0;
+    var v = n;
+    while (v > 0) {
+        enc_size += 1;
+        v = @divTrunc(v, 10);
+    }
+    return enc_size;
+}
+
 const expect = std.testing.expect;
+
+// test "encode_dict" {
+//     const MyDict = struct {
+//         foo: u8,
+//     };
+//     var buffer: [10]u8 = undefined;
+//     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+//     var gpa = alloc.allocator();
+//     const r = try encode(MyDict{ .foo = 123 }, &gpa);
+//     try expect(std.mem.eql(u8, r, "d3:fooi3ee"));
+// }
 
 test "encode_str" {
     const v = "avocado";
