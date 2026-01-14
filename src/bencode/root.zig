@@ -18,8 +18,33 @@ pub const Error = error{
 fn encode(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
     return switch (@typeInfo(@TypeOf(value))) {
         inline .int => try encode_int(value, alloc),
+        inline .@"enum" => try encode_int(@intFromEnum(value), alloc),
+        inline .array => |arr| {
+            if (arr.child != u8) return Error.NotSupported;
+            return try encode_str(&value, alloc);
+        },
+        inline .pointer => |p| {
+            if (@typeInfo(p.child).array.child != u8) return Error.NotSupported;
+            return try encode_str(&value.*, alloc);
+        },
         inline else => Error.NotSupported,
     };
+}
+
+fn encode_str(value: []const u8, alloc: *std.mem.Allocator) ![]u8 {
+    var enc_size: usize = 0;
+    var v = value.len;
+    while (v > 0) {
+        enc_size += 1;
+        v = @divTrunc(v, 10);
+    }
+    const buf_len = enc_size + 1 + value.len;
+    const buf = try alloc.alloc(u8, buf_len);
+    var w = Writer.fixed(buf);
+    try w.printIntAny(value.len, 10, .lower, .{});
+    buf[enc_size] = ':';
+    @memcpy(buf[enc_size + 1..], value);
+    return buf;
 }
 
 fn encode_int(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
@@ -29,17 +54,15 @@ fn encode_int(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
         size += 1;
         v = @divTrunc(v, 10);
     }
-    var len = 2 + size;
+    var buf_len = 2 + size;
     if (value < 0) {
-        len += 1;
+        buf_len += 1;
     }
-    const buf = try alloc.alloc(u8, len);
-    // print("{d} {d}\n", .{size, buf.len});
+    const buf = try alloc.alloc(u8, buf_len);
     buf[0] = 'i';
     var w = Writer.fixed(buf[1 .. buf.len - 1]);
-    try w.printInt(value, 10, .lower, .{});
+    try w.printIntAny(value, 10, .lower, .{});
     buf[buf.len - 1] = 'e';
-
     return buf;
 }
 
@@ -53,9 +76,7 @@ pub fn decode(
         inline .@"enum" => |en| @enumFromInt(try decode_int(en.tag_type, reader)),
         inline .pointer => |p| {
             // []u8 will fall in this branch which is considered a string.
-            if (p.child != u8) {
-                return Error.NotSupported;
-            }
+            if (p.child != u8) return Error.NotSupported;
             return try decode_str(reader);
         },
         inline .@"struct" => |str| try decode_dict(T, str, reader),
@@ -218,13 +239,54 @@ fn decode_int(
 
 const expect = std.testing.expect;
 
+test "encode_str" {
+    const v = "avocado";
+    var buffer: [9]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(v, &gpa);
+    try expect(std.mem.eql(u8, r, "7:avocado"));
+}
+
+test "encode_str_2" {
+    const v = "iwillhave11";
+    var buffer: [14]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(v, &gpa);
+    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+}
+
+test "encode_str_3" {
+    const v = "iwillhave11";
+    const vv = v.*;
+    var buffer: [14]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(vv, &gpa);
+    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+}
+
+test "encode_enum" {
+    const MyEnum = enum(u8) {
+        Core,
+        ExtHandshake,
+        Metainfo,
+    };
+    var buffer: [3]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(MyEnum.ExtHandshake, &gpa);
+    try expect(std.mem.eql(u8, r, "i1e"));
+}
+
 test "encode_int" {
-    const v: u8 = 123;
+    const v: u8 = 255;
     var buffer: [5]u8 = undefined;
     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
     var gpa = alloc.allocator();
     const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "i123e"));
+    try expect(std.mem.eql(u8, r, "i255e"));
 }
 
 test "encode_int_2" {
