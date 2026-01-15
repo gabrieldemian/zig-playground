@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
+const Allocator = std.mem.Allocator;
 
 const EMPTY_STR = "";
 
@@ -14,10 +15,9 @@ pub const Error = error{
     MissingColon,
 };
 
-pub fn encode(comptime value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+pub fn encode(comptime value: anytype, alloc: *Allocator) ![]u8 {
     const buf = try alloc.alloc(u8, try get_size(value));
     var w = Writer.fixed(buf);
-    // std.debug.print("size: {d}\n", .{buf.len});
     try _encode(value, &w);
     return buf;
 }
@@ -28,6 +28,7 @@ fn _encode(comptime value: anytype, w: *Writer) !void {
         inline .@"enum" => try encode_int(@intFromEnum(value), w),
         inline .@"struct" => try encode_dict(value, w),
         inline .array => |arr| {
+            // [n:0]u8 OR [n]u8
             if (arr.child == u8) {
                 return try encode_str(&value, w);
             }
@@ -35,9 +36,19 @@ fn _encode(comptime value: anytype, w: *Writer) !void {
         },
         inline .pointer => |p| {
             return switch (@typeInfo(p.child)) {
-                inline .array => |_| {
-                    // if (arr.child != u8) return Error.NotSupported;
-                    return try encode_str(&value.*, w);
+                inline .array => |arr| {
+                    // *const [n]u8 OR *[n]u8
+                    if (arr.child == u8) {
+                        return try encode_str(&value.*, w);
+                    }
+                    return try encode_list(&value.*, w);
+                },
+                inline .int => |_| {
+                    // const []u8 OR [n]u32, etc
+                    if (p.child == u8) {
+                        return try encode_str(value, w);
+                    }
+                    return try encode_list(&value, w);
                 },
                 else => Error.NotSupported,
             };
@@ -191,10 +202,7 @@ fn decode_str(reader: *Reader) ![]const u8 {
 
 /// Decode an integer, encoded as `i<base10 integer>e`.
 /// For example: `i123e`
-fn decode_int(
-    comptime T: type,
-    reader: *Reader,
-) !T {
+fn decode_int(comptime T: type, reader: *Reader) !T {
     const Int = @typeInfo(T).int;
 
     if (reader.buffer[reader.seek..].len < 3) {
@@ -275,17 +283,20 @@ fn get_size(comptime value: anytype) !usize {
             return count;
         },
         inline .array => |arr| {
-            // this is a string
+            // considered a string
+            // [n:0]u8 OR [n]u8
             if (arr.child == u8) {
                 return get_num_digits(arr.len) + 1 + arr.len;
             }
+            // considered a list
             var count: usize = 2;
             inline for (value) |v| {
                 count += try get_size(v);
             }
             return count;
         },
-        // [] child: u8, [] child: 32, etc.
+        // *const [n]u8 OR *[n]u8
+        // const []u8 OR [n]u32, etc
         inline .pointer => |p| {
             return switch (@typeInfo(p.child)) {
                 inline .array => |arr| {
@@ -303,11 +314,10 @@ const expect = std.testing.expect;
 
 test "encode_list" {
     const v = [_]u32{ 0, 2 };
-    var buffer: [16]u8 = undefined;
+    var buffer: [8]u8 = undefined;
     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
     var gpa = alloc.allocator();
     const r = try encode(v, &gpa);
-    // std.debug.print("r: {s}\n", .{r});
     try expect(std.mem.eql(u8, r, "li0ei2ee"));
 }
 
@@ -343,6 +353,26 @@ test "encode_str_2" {
 test "encode_str_3" {
     const v = "iwillhave11";
     const vv = v.*;
+    var buffer: [14]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(vv, &gpa);
+    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+}
+
+test "encode_str_4" {
+    const v = "iwillhave11";
+    const vv: [:0]const u8 = v;
+    var buffer: [14]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(vv, &gpa);
+    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+}
+
+test "encode_str_5" {
+    const v = "iwillhave11";
+    const vv: []const u8 = v;
     var buffer: [14]u8 = undefined;
     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
     var gpa = alloc.allocator();
