@@ -1,5 +1,4 @@
 const std = @import("std");
-const print = std.debug.print;
 const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -15,70 +14,64 @@ pub const Error = error{
     MissingColon,
 };
 
-fn encode(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+pub fn encode(comptime value: anytype, alloc: *std.mem.Allocator) ![]u8 {
+    const buf = try alloc.alloc(u8, try get_size(value));
+    var w = Writer.fixed(buf);
+    try _encode(value, &w);
+    return buf;
+}
+
+fn _encode(comptime value: anytype, w: *Writer) !void {
     return switch (@typeInfo(@TypeOf(value))) {
-        inline .int => try encode_int(value, alloc),
-        inline .@"enum" => try encode_int(@intFromEnum(value), alloc),
-        inline .@"struct" => try encode_dict(value, alloc),
+        inline .int => try encode_int(value, w),
+        inline .@"enum" => try encode_int(@intFromEnum(value), w),
+        inline .@"struct" => try encode_dict(value, w),
         inline .array => |arr| {
             if (arr.child != u8) return Error.NotSupported;
-            return try encode_str(&value, alloc);
+            return try encode_str(&value, w);
         },
         inline .pointer => |p| {
-            if (@typeInfo(p.child).array.child != u8) return Error.NotSupported;
-            return try encode_str(&value.*, alloc);
+            return switch (@typeInfo(p.child)) {
+                inline .array => |arr| {
+                    if (arr.child != u8) return Error.NotSupported;
+                    return try encode_str(&value.*, w);
+                },
+                else => Error.NotSupported,
+            };
         },
         inline else => Error.NotSupported,
     };
 }
 
-fn encode_dict(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
-    const Str = @typeInfo(value).@"struct";
-    const buf = try alloc.alloc(u8, @sizeOf(value) * 2);
-    var w = Writer.fixed(buf);
-    _ = &w;
-
+fn encode_dict(comptime value: anytype, w: *Writer) !void {
+    const Str = @typeInfo(@TypeOf(value)).@"struct";
+    try w.writeByte('d');
     inline for (Str.fields) |f| {
-        _ = try encode(f.name, alloc);
-        _ = try encode(f.value, alloc);
+        const name: []const u8 = f.name;
+        try encode_str(name, w);
+        try _encode(@field(value, f.name), w);
     }
+    try w.writeByte('e');
 }
 
-fn encode_str(value: []const u8, alloc: *std.mem.Allocator) ![]u8 {
-    const enc_size = get_enc_size(value.len);
-    const buf_len = enc_size + 1 + value.len;
-    const buf = try alloc.alloc(u8, buf_len);
-    var w = Writer.fixed(buf);
+fn encode_str(value: []const u8, w: *Writer) !void {
     try w.printIntAny(value.len, 10, .lower, .{});
-    buf[enc_size] = ':';
-    @memcpy(buf[enc_size + 1 ..], value);
-    return buf;
+    try w.writeByte(':');
+    try w.writeAll(value);
 }
 
-fn encode_int(value: anytype, alloc: *std.mem.Allocator) ![]u8 {
-    const size = get_enc_size(@abs(value));
-    var buf_len = 2 + size;
-    if (value < 0) {
-        buf_len += 1;
-    }
-    const buf = try alloc.alloc(u8, buf_len);
-    buf[0] = 'i';
-    var w = Writer.fixed(buf[1 .. buf.len - 1]);
+fn encode_int(value: anytype, w: *Writer) !void {
+    try w.writeByte('i');
     try w.printIntAny(value, 10, .lower, .{});
-    buf[buf.len - 1] = 'e';
-    return buf;
+    try w.writeByte('e');
 }
 
-pub fn decode(
-    /// The type to decode `data` into.
-    comptime T: type,
-    reader: *Reader,
-) !T {
+pub fn decode(comptime T: type, reader: *Reader) !T {
     return switch (@typeInfo(T)) {
         inline .int => try decode_int(T, reader),
         inline .@"enum" => |en| @enumFromInt(try decode_int(en.tag_type, reader)),
+        // []u8 will fall in this branch which is considered a string.
         inline .pointer => |p| {
-            // []u8 will fall in this branch which is considered a string.
             if (p.child != u8) return Error.NotSupported;
             return try decode_str(reader);
         },
@@ -242,7 +235,7 @@ fn decode_int(
 /// const n = get_enc_size(123);
 /// try std.testing.expect(n == 3);
 /// ```
-fn get_enc_size(n: anytype) usize {
+fn get_num_digits(n: usize) usize {
     var enc_size: usize = 0;
     var v = n;
     while (v > 0) {
@@ -252,18 +245,56 @@ fn get_enc_size(n: anytype) usize {
     return enc_size;
 }
 
+fn get_size(comptime value: anytype) !usize {
+    return switch (@typeInfo(@TypeOf(value))) {
+        inline .int => {
+            const size = get_num_digits(@abs(value));
+            var buf_len = 2 + size;
+            if (value < 0) {
+                buf_len += 1;
+            }
+            return buf_len;
+        },
+        inline .@"enum" => get_size(@intFromEnum(value)),
+        inline .@"struct" => |str| {
+            var count: usize = 2;
+            inline for (str.fields) |f| {
+                const name: []const u8 = f.name;
+                count += try get_size(name);
+                count += try get_size(@field(value, f.name));
+            }
+            return count;
+        },
+        inline .array => |arr| {
+            if (arr.child != u8) return Error.NotSupported;
+            return get_num_digits(arr.len) + 1 + arr.len;
+        },
+        inline .pointer => |p| {
+            return switch (@typeInfo(p.child)) {
+                inline .array => |arr| {
+                    if (arr.child != u8) return Error.NotSupported;
+                    return get_num_digits(arr.len) + 1 + arr.len;
+                },
+                inline .int => return get_num_digits(value.len) + 1 + value.len,
+                else => Error.NotSupported,
+            };
+        },
+        inline else => Error.NotSupported,
+    };
+}
+
 const expect = std.testing.expect;
 
-// test "encode_dict" {
-//     const MyDict = struct {
-//         foo: u8,
-//     };
-//     var buffer: [10]u8 = undefined;
-//     var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-//     var gpa = alloc.allocator();
-//     const r = try encode(MyDict{ .foo = 123 }, &gpa);
-//     try expect(std.mem.eql(u8, r, "d3:fooi3ee"));
-// }
+test "encode_dict" {
+    const MyDict = struct {
+        foo: u16,
+    };
+    var buffer: [12]u8 = undefined;
+    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+    var gpa = alloc.allocator();
+    const r = try encode(MyDict{ .foo = 123 }, &gpa);
+    try expect(std.mem.eql(u8, r, "d3:fooi123ee"));
+}
 
 test "encode_str" {
     const v = "avocado";
@@ -457,7 +488,6 @@ test "arr_int_4" {
     const encoded = "lli1ei2ei3eeli4ei5ei6eeli7ei8ei9eee";
     var r = Reader.fixed(encoded);
     const s = try decode([3][3]u8, &r);
-    // print("arr: {d} {s}\n", .{ r.seek, r.buffer[r.seek..] });
     try expect(s[0][0] == 1);
     try expect(s[0][1] == 2);
     try expect(s[0][2] == 3);
