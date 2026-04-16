@@ -29,25 +29,19 @@ fn _encode(comptime value: anytype, w: *Writer) !void {
         inline .@"struct" => try encode_dict(value, w),
         inline .array => |arr| {
             // [n:0]u8 OR [n]u8
-            if (arr.child == u8) {
-                return try encode_str(&value, w);
-            }
+            if (arr.child == u8) return try encode_str(&value, w);
             return try encode_list(&value, w);
         },
         inline .pointer => |p| {
             return switch (@typeInfo(p.child)) {
                 inline .array => |arr| {
                     // *const [n]u8 OR *[n]u8
-                    if (arr.child == u8) {
-                        return try encode_str(&value.*, w);
-                    }
+                    if (arr.child == u8) return try encode_str(&value.*, w);
                     return try encode_list(&value.*, w);
                 },
-                inline .int => |_| {
+                inline .int => {
                     // const []u8 OR [n]u32, etc
-                    if (p.child == u8) {
-                        return try encode_str(value, w);
-                    }
+                    if (p.child == u8) return try encode_str(value, w);
                     return try encode_list(&value, w);
                 },
                 else => Error.NotSupported,
