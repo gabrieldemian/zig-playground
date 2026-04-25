@@ -15,27 +15,99 @@ pub const Error = error{
     MissingColon,
 };
 
+/// Get the size that a value have when encoded.
+fn size_of(comptime value: anytype) !usize {
+    return switch (@typeInfo(@TypeOf(value))) {
+        inline .int => {
+            var buf_len = 2 + get_num_digits(@abs(value));
+            if (value < 0) {
+                buf_len += 1;
+            }
+            return buf_len;
+        },
+        inline .@"enum" => size_of(@intFromEnum(value)),
+        inline .@"struct" => |str| {
+            var count: usize = 2;
+            inline for (str.fields) |f| {
+                count += try size_of(f.name);
+                count += try size_of(@field(value, f.name));
+            }
+            return count;
+        },
+        inline .array => |arr| {
+            // considered a string
+            // [n:0]u8
+            if (arr.child == u8 and arr.sentinel() == 0) {
+                return get_num_digits(arr.len) + 1 + arr.len;
+            }
+            // considered a list
+            var count: usize = 2;
+            inline for (value) |v| {
+                count += try size_of(v);
+            }
+            return count;
+        },
+        // considered a string
+        //  *const [n:0]u8 = .pointer .one .array .child [7:0]u8
+        //  [:0]u8         = .pointer .slice      .child u8
+        //  [n:0]u8        = .array   .           .child u8
+        //  considered a list
+        //  []u8  = .pointer .slice .child u8 (and other types)
+        //  [n]u8 = .array .child u8 (and other types)
+        inline .pointer => |p| {
+            if (p.size == .one) {
+                return size_of(p.child);
+            }
+            return switch (@typeInfo(p.child)) {
+                inline .array => |arr| {
+                    return get_num_digits(arr.len) + 1 + arr.len;
+                },
+                inline .int => {
+                    // string
+                    // [:0]u8
+                    if (p.sentinel() == 0 and p.child == u8) {
+                        return get_num_digits(value.len) + 1 + value.len;
+                    }
+                    // list
+                    // []u8
+                    var count: usize = 2;
+                    inline for (value) |v| {
+                        count += try size_of(v);
+                    }
+                    return count;
+                },
+                else => Error.NotSupported,
+            };
+        },
+        inline else => Error.NotSupported,
+    };
+}
+
 pub fn encode(comptime value: anytype, w: *Writer) !void {
     return switch (@typeInfo(@TypeOf(value))) {
         inline .int => try encode_int(value, w),
         inline .@"enum" => try encode_int(@intFromEnum(value), w),
         inline .@"struct" => try encode_dict(value, w),
         inline .array => |arr| {
-            // [n:0]u8 OR [n]u8
-            if (arr.child == u8) return try encode_str(&value, w);
+            if (arr.child == u8 and arr.sentinel() == 0)
+                return try encode_str(&value, w);
             return try encode_list(&value, w);
         },
         inline .pointer => |p| {
             return switch (@typeInfo(p.child)) {
                 inline .array => |arr| {
-                    // *const [n]u8 OR *[n]u8
-                    if (arr.child == u8) return try encode_str(&value.*, w);
+                    if (arr.child == u8 and arr.sentinel() == 0)
+                        return try encode_str(&value.*, w);
                     return try encode_list(&value.*, w);
                 },
                 inline .int => {
-                    // const []u8 OR [n]u32, etc
-                    if (p.child == u8) return try encode_str(value, w);
-                    return try encode_list(&value, w);
+                    // string
+                    // [:0]u8
+                    if (p.sentinel() == 0 and p.child == u8)
+                        return try encode_str(value, w);
+                    // list
+                    // []u8
+                    return try encode_list(value, w);
                 },
                 else => Error.NotSupported,
             };
@@ -78,7 +150,6 @@ pub fn decode(comptime T: type, reader: *Reader) !T {
     return switch (@typeInfo(T)) {
         inline .int => try decode_int(T, reader),
         inline .@"enum" => |en| @enumFromInt(try decode_int(en.tag_type, reader)),
-        // []u8 will fall in this branch which is considered a string.
         inline .pointer => |p| {
             if (p.child != u8) return Error.NotSupported;
             return try decode_str(reader);
@@ -251,63 +322,7 @@ fn get_num_digits(n: usize) usize {
     return enc_size;
 }
 
-/// Get the size that a value have when encoded.
-fn size_of(comptime value: anytype) !usize {
-    return switch (@typeInfo(@TypeOf(value))) {
-        inline .int => {
-            var buf_len = 2 + get_num_digits(@abs(value));
-            if (value < 0) {
-                buf_len += 1;
-            }
-            return buf_len;
-        },
-        inline .@"enum" => size_of(@intFromEnum(value)),
-        inline .@"struct" => |str| {
-            var count: usize = 2;
-            inline for (str.fields) |f| {
-                count += try size_of(f.name);
-                count += try size_of(@field(value, f.name));
-            }
-            return count;
-        },
-        inline .array => |arr| {
-            // considered a string
-            // [n:0]u8 OR [n]u8
-            if (arr.child == u8) {
-                return get_num_digits(arr.len) + 1 + arr.len;
-            }
-            // considered a list
-            var count: usize = 2;
-            inline for (value) |v| {
-                count += try size_of(v);
-            }
-            return count;
-        },
-        // *const [n]u8 OR *[n]u8
-        // const []u8 OR [n]u32, etc
-        inline .pointer => |p| {
-            return switch (@typeInfo(p.child)) {
-                inline .array => |arr| {
-                    return get_num_digits(arr.len) + 1 + arr.len;
-                },
-                inline .int => return get_num_digits(value.len) + 1 + value.len,
-                else => Error.NotSupported,
-            };
-        },
-        inline else => Error.NotSupported,
-    };
-}
-
 const expect = std.testing.expect;
-
-test "encode_list" {
-    const v = [_]u32{ 0, 2 };
-    var buffer: [try size_of(v)]u8 = undefined;
-    try expect(buffer.len == 8);
-    var w = Writer.fixed(&buffer);
-    try encode(v, &w);
-    try expect(std.mem.eql(u8, &buffer, "li0ei2ee"));
-}
 
 test "encode_dict" {
     const MyDict = struct {
@@ -320,9 +335,53 @@ test "encode_dict" {
     try expect(std.mem.eql(u8, &buffer, "d3:fooi123ee"));
 }
 
-test "encode_str" {
-    const v = "avocado";
+test "encode_list_1" {
+    const v = [2]u32{ 0, 2 };
     var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 8);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "li0ei2ee"));
+}
+
+test "encode_list_2" {
+    const v = [2]u8{ 0, 2 };
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 8);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "li0ei2ee"));
+}
+
+// will be considered a list because it's not null terminated.
+test "encode_list_3" {
+    const v = "will";
+    const vv: []const u8 = v;
+    var buffer: [try size_of(vv)]u8 = undefined;
+    try expect(buffer.len == 22);
+    var w = Writer.fixed(&buffer);
+    try encode(vv, &w);
+    try expect(std.mem.eql(u8, &buffer, "li119ei105ei108ei108ee"));
+}
+
+// a list because must be u8 AND null terminated
+test "encode_list_4" {
+    const v = [4:0]u32{ 119, 105, 108, 108 };
+    std.debug.print("v {any}\n", .{v});
+    var buffer: [try size_of(v)]u8 = undefined;
+    std.debug.print("{d}\n", .{buffer.len});
+    try expect(buffer.len == 22);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    std.debug.print("{s}\n", .{buffer});
+    try expect(std.mem.eql(u8, &buffer, "li119ei105ei108ei108ee"));
+}
+
+// strings in this lib must be null terminated.
+
+test "encode_str_1" {
+    const v = "avocado";
+    var buffer: [9:0]u8 = undefined;
     try expect(buffer.len == 9);
     var w = Writer.fixed(&buffer);
     try encode(v, &w);
@@ -331,35 +390,7 @@ test "encode_str" {
 
 test "encode_str_2" {
     const v = "iwillhave11";
-    var buffer: [try size_of(v)]u8 = undefined;
-    try expect(buffer.len == 14);
-    var w = Writer.fixed(&buffer);
-    try encode(v, &w);
-    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
-}
-
-test "encode_str_3" {
-    const v = "iwillhave11";
-    var buffer: [try size_of(v)]u8 = undefined;
-    try expect(buffer.len == 14);
-    var w = Writer.fixed(&buffer);
-    try encode(v.*, &w);
-    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
-}
-
-test "encode_str_4" {
-    const v = "iwillhave11";
     const vv: [:0]const u8 = v;
-    var buffer: [try size_of(vv)]u8 = undefined;
-    try expect(buffer.len == 14);
-    var w = Writer.fixed(&buffer);
-    try encode(vv, &w);
-    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
-}
-
-test "encode_str_5" {
-    const v = "iwillhave11";
-    const vv: []const u8 = v;
     var buffer: [try size_of(vv)]u8 = undefined;
     try expect(buffer.len == 14);
     var w = Writer.fixed(&buffer);
@@ -373,10 +404,11 @@ test "encode_enum" {
         ExtHandshake,
         Metainfo,
     };
+    const v = MyEnum.ExtHandshake;
     var buffer: [try size_of(MyEnum.ExtHandshake)]u8 = undefined;
     try expect(buffer.len == 3);
     var w = Writer.fixed(&buffer);
-    try encode(MyEnum.ExtHandshake, &w);
+    try encode(v, &w);
     try expect(std.mem.eql(u8, &buffer, "i1e"));
 }
 
@@ -573,6 +605,14 @@ test "decode_str" {
     try expect(r.seek == encoded.len - 1);
 }
 
+test "decode_str_2" {
+    const encoded = "10:hihhihhihh";
+    var r = Reader.fixed(encoded);
+    const s = try decode([]const u8, &r);
+    try expect(std.mem.eql(u8, s, "hihhihhihh"));
+    try expect(r.seek == encoded.len - 1);
+}
+
 test "empty_str" {
     const encoded = "0:";
     var r = Reader.fixed(encoded);
@@ -586,14 +626,6 @@ test "empty_arr" {
     var r = Reader.fixed(encoded);
     const s = decode([1][]const u8, &r);
     try expect(s == Error.Empty);
-    try expect(r.seek == encoded.len - 1);
-}
-
-test "decode_str_2" {
-    const encoded = "10:hihhihhihh";
-    var r = Reader.fixed(encoded);
-    const s = try decode([]const u8, &r);
-    try expect(std.mem.eql(u8, s, "hihhihhihh"));
     try expect(r.seek == encoded.len - 1);
 }
 
