@@ -20,8 +20,9 @@
     in
     {
       devShells.x86_64-linux.default = pkgs.mkShell {
-        packages = [
+        packages = with pkgs; [
           zig
+          binsider
           # zls
         ];
       };

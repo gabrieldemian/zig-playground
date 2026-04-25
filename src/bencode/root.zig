@@ -15,14 +15,7 @@ pub const Error = error{
     MissingColon,
 };
 
-pub fn encode(comptime value: anytype, alloc: *Allocator) ![]u8 {
-    const buf = try alloc.alloc(u8, try get_size(value));
-    var w = Writer.fixed(buf);
-    try _encode(value, &w);
-    return buf;
-}
-
-fn _encode(comptime value: anytype, w: *Writer) !void {
+pub fn encode(comptime value: anytype, w: *Writer) !void {
     return switch (@typeInfo(@TypeOf(value))) {
         inline .int => try encode_int(value, w),
         inline .@"enum" => try encode_int(@intFromEnum(value), w),
@@ -54,7 +47,7 @@ fn _encode(comptime value: anytype, w: *Writer) !void {
 fn encode_list(comptime value: anytype, w: *Writer) !void {
     try w.writeByte('l');
     inline for (value) |f| {
-        try _encode(f, w);
+        try encode(f, w);
     }
     try w.writeByte('e');
 }
@@ -64,7 +57,7 @@ fn encode_dict(comptime value: anytype, w: *Writer) !void {
     try w.writeByte('d');
     inline for (Str.fields) |f| {
         try encode_str(f.name, w);
-        try _encode(@field(value, f.name), w);
+        try encode(@field(value, f.name), w);
     }
     try w.writeByte('e');
 }
@@ -258,7 +251,8 @@ fn get_num_digits(n: usize) usize {
     return enc_size;
 }
 
-fn get_size(comptime value: anytype) !usize {
+/// Get the size that a value have when encoded.
+fn size_of(comptime value: anytype) !usize {
     return switch (@typeInfo(@TypeOf(value))) {
         inline .int => {
             var buf_len = 2 + get_num_digits(@abs(value));
@@ -267,12 +261,12 @@ fn get_size(comptime value: anytype) !usize {
             }
             return buf_len;
         },
-        inline .@"enum" => get_size(@intFromEnum(value)),
+        inline .@"enum" => size_of(@intFromEnum(value)),
         inline .@"struct" => |str| {
             var count: usize = 2;
             inline for (str.fields) |f| {
-                count += try get_size(f.name);
-                count += try get_size(@field(value, f.name));
+                count += try size_of(f.name);
+                count += try size_of(@field(value, f.name));
             }
             return count;
         },
@@ -285,7 +279,7 @@ fn get_size(comptime value: anytype) !usize {
             // considered a list
             var count: usize = 2;
             inline for (value) |v| {
-                count += try get_size(v);
+                count += try size_of(v);
             }
             return count;
         },
@@ -308,70 +302,69 @@ const expect = std.testing.expect;
 
 test "encode_list" {
     const v = [_]u32{ 0, 2 };
-    var buffer: [8]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "li0ei2ee"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 8);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "li0ei2ee"));
 }
 
 test "encode_dict" {
     const MyDict = struct {
         foo: u16,
     };
-    var buffer: [12]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(MyDict{ .foo = 123 }, &gpa);
-    try expect(std.mem.eql(u8, r, "d3:fooi123ee"));
+    var buffer: [try size_of(MyDict{ .foo = 123 })]u8 = undefined;
+    try expect(buffer.len == 12);
+    var w = Writer.fixed(&buffer);
+    try encode(MyDict{ .foo = 123 }, &w);
+    try expect(std.mem.eql(u8, &buffer, "d3:fooi123ee"));
 }
 
 test "encode_str" {
     const v = "avocado";
-    var buffer: [9]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "7:avocado"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 9);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "7:avocado"));
 }
 
 test "encode_str_2" {
     const v = "iwillhave11";
-    var buffer: [14]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 14);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
 }
 
 test "encode_str_3" {
     const v = "iwillhave11";
-    const vv = v.*;
-    var buffer: [14]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(vv, &gpa);
-    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 14);
+    var w = Writer.fixed(&buffer);
+    try encode(v.*, &w);
+    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
 }
 
 test "encode_str_4" {
     const v = "iwillhave11";
     const vv: [:0]const u8 = v;
-    var buffer: [14]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(vv, &gpa);
-    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+    var buffer: [try size_of(vv)]u8 = undefined;
+    try expect(buffer.len == 14);
+    var w = Writer.fixed(&buffer);
+    try encode(vv, &w);
+    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
 }
 
 test "encode_str_5" {
     const v = "iwillhave11";
     const vv: []const u8 = v;
-    var buffer: [14]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(vv, &gpa);
-    try expect(std.mem.eql(u8, r, "11:iwillhave11"));
+    var buffer: [try size_of(vv)]u8 = undefined;
+    try expect(buffer.len == 14);
+    var w = Writer.fixed(&buffer);
+    try encode(vv, &w);
+    try expect(std.mem.eql(u8, &buffer, "11:iwillhave11"));
 }
 
 test "encode_enum" {
@@ -380,38 +373,38 @@ test "encode_enum" {
         ExtHandshake,
         Metainfo,
     };
-    var buffer: [3]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(MyEnum.ExtHandshake, &gpa);
-    try expect(std.mem.eql(u8, r, "i1e"));
+    var buffer: [try size_of(MyEnum.ExtHandshake)]u8 = undefined;
+    try expect(buffer.len == 3);
+    var w = Writer.fixed(&buffer);
+    try encode(MyEnum.ExtHandshake, &w);
+    try expect(std.mem.eql(u8, &buffer, "i1e"));
 }
 
 test "encode_int" {
     const v: u8 = 255;
-    var buffer: [5]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "i255e"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 5);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "i255e"));
 }
 
 test "encode_int_2" {
     const v: i8 = 30;
-    var buffer: [4]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "i30e"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    var w = Writer.fixed(&buffer);
+    try expect(buffer.len == 4);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "i30e"));
 }
 
 test "encode_int_3" {
     const v: i8 = -30;
-    var buffer: [5]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-    var gpa = alloc.allocator();
-    const r = try encode(v, &gpa);
-    try expect(std.mem.eql(u8, r, "i-30e"));
+    var buffer: [try size_of(v)]u8 = undefined;
+    try expect(buffer.len == 5);
+    var w = Writer.fixed(&buffer);
+    try encode(v, &w);
+    try expect(std.mem.eql(u8, &buffer, "i-30e"));
 }
 
 test "enum" {
