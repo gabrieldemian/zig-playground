@@ -205,47 +205,43 @@ fn Decode_Return(comptime T: type) type {
     };
 }
 
-pub fn decode(comptime T: type, reader: *Reader) !Decode_Return(T) {
-    return switch (@typeInfo(T)) {
-        inline .int => try decode_int(T, reader),
-        inline .@"enum" => |en| @enumFromInt(try decode_int(en.tag_type, reader)),
-        inline .@"struct" => try decode_dict(T, reader),
+pub fn decode(comptime T: type, r: *Reader, w: *Writer) !void {
+    switch (@typeInfo(T)) {
+        inline .int => try decode_int(T, r, w),
+        inline .@"enum" => |en| try decode_int(en.tag_type, r, w),
+        inline .@"struct" => try decode_dict(T, r, w),
         inline .array => |arr| {
             if (arr.child == u8 and arr.sentinel() == 0)
-                return try decode_str(reader);
-            return try decode_list(arr, reader);
+                return try decode_str(r, w);
+            return try decode_list(arr, r, w);
         },
+        // * [] [:0]
         inline .pointer => |p| {
+            // [] [:0]
+            if (p.sentinel() == 0 and p.child == u8) {
+                return try decode_str(r, w);
+            }
             return switch (@typeInfo(p.child)) {
                 inline .array => |arr| {
                     if (arr.child == u8 and arr.sentinel() == 0)
-                        return try decode_str(reader);
-                    return try decode_list(@typeInfo(p.child).array, reader);
-                },
-                inline .int => {
-                    // string
-                    // [:0]u8
-                    if (p.child == u8 and p.sentinel() == 0)
-                        return try decode_str(reader);
-                    // list
-                    // []u8
-                    return try decode_list(@typeInfo(p.child).array, reader);
+                        return try decode_str(r, w);
+                    return try decode_list(arr, r, w);
                 },
                 else => Error.NotSupported,
             };
         },
         inline else => Error.NotSupported,
-    };
+    }
 }
 
 /// Dicts are encoded as `d<str><val>e`.
 /// For example: `d3:fooi2ee`.
-fn decode_dict(comptime T: type, reader: *Reader) !T {
-    const data = reader.buffer[reader.seek..];
+fn decode_dict(comptime T: type, r: *Reader, w: *Writer) !void {
+    const data = r.buffer[r.seek..];
 
     // empty dict
     if (std.mem.eql(u8, data, "de")) {
-        reader.toss(1);
+        r.toss(1);
         return Error.Empty;
     }
 
@@ -255,33 +251,35 @@ fn decode_dict(comptime T: type, reader: *Reader) !T {
         return Error.MalformedBuffer;
     }
 
-    var dict: T = undefined;
+    // var dict: T = undefined;
 
     inline for (@typeInfo(T).@"struct".fields) |f| {
         // enter the field str `3:foo...`
-        reader.toss(1);
-        _ = try decode_str(reader);
-        // enter the next data structure `i2e...`
-        reader.toss(1);
-
-        @field(dict, f.name) = try decode(f.type, reader);
+        r.toss(1);
+        // skip the string into the value `i2e...`
+        //                                 ^
+        try skip_str(r);
+        // enter the next data structure `i2e^`
+        r.toss(1);
+        // @field(dict, f.name) = try decode(f.type, r);
+        try decode(f.type, r, w);
     }
 
-    reader.toss(1);
-    return dict;
+    r.toss(1);
 }
 
 /// Lists are encoded as `l<elements>e`.
 /// For example: `l3:foo:bare`.
 fn decode_list(
     comptime Arr: std.builtin.Type.Array,
-    reader: *Reader,
-) ![Arr.len]Arr.child {
-    const data = reader.buffer[reader.seek..];
+    r: *Reader,
+    w: *Writer,
+) !void {
+    const data = r.buffer[r.seek..];
 
     // empty list
     if (std.mem.eql(u8, data, "le")) {
-        reader.toss(1);
+        r.toss(1);
         // todo: not return an error here
         return Error.Empty;
     }
@@ -294,68 +292,92 @@ fn decode_list(
         return Error.MalformedBuffer;
     }
 
-    var arr: [Arr.len]Arr.child = undefined;
+    // var arr: [Arr.len]Arr.child = undefined;
 
-    inline for (0..Arr.len) |i| {
+    inline for (0..Arr.len) |_| {
         // skip the last byte of the prev structure and
         // enter the current one
-        reader.toss(1);
-        const v: Arr.child = try decode(Arr.child, reader);
-        arr[i] = v;
+        r.toss(1);
+        try decode(Arr.child, r, w);
+        // arr[i] = v;
+        // try w.write(v);
     }
 
-    reader.toss(1);
-    return arr;
+    r.toss(1);
 }
 
 /// Decode a byte str, encoded as `<length>:<contents>`.
 /// `<length>` is specified in bytes, not characters.
 /// For example: `6:italia`.
-fn decode_str(reader: *Reader) ![]u8 {
-    if (reader.buffer[reader.seek..].len < 2) {
+fn decode_str(r: *Reader, w: *Writer) !void {
+    std.debug.print("wtf {s}\n", .{r.buffer[r.seek..]});
+    if (r.buffer[r.seek..].len < 2) {
         return Error.MalformedBuffer;
     }
 
     // empty string
-    if (std.mem.eql(u8, reader.buffer[reader.seek..], "0:")) {
-        reader.toss(1);
-        return EMPTY_STR;
+    if (std.mem.eql(u8, r.buffer[r.seek..], "0:")) {
+        r.toss(1);
+        return;
     }
 
     const colon = std.mem.find(
         u8,
-        reader.buffer[reader.seek..],
+        r.buffer[r.seek..],
         ":",
     ) orelse return Error.MissingColon;
-    const len_slice = reader.buffer[reader.seek .. reader.seek + colon];
+
+    const len_slice = r.buffer[r.seek .. r.seek + colon];
     const len = try std.fmt.parseInt(usize, len_slice, 10);
     const str =
-        reader.buffer[reader.seek + colon + 1 .. reader.seek + colon + len + 1];
-    reader.toss(colon + len);
+        r.buffer[r.seek + colon + 1 .. r.seek + colon + len + 1];
 
-    return str;
+    r.toss(colon + len);
+    try w.writeAll(str);
+}
+
+fn skip_str(r: *Reader) !void {
+    if (r.buffer[r.seek..].len < 2) {
+        return Error.MalformedBuffer;
+    }
+
+    // empty string
+    if (std.mem.eql(u8, r.buffer[r.seek..], "0:")) {
+        r.toss(1);
+        return;
+    }
+
+    const colon = std.mem.find(
+        u8,
+        r.buffer[r.seek..],
+        ":",
+    ) orelse return Error.MissingColon;
+
+    const len_slice = r.buffer[r.seek .. r.seek + colon];
+    const len = try std.fmt.parseInt(usize, len_slice, 10);
+    r.toss(colon + len);
 }
 
 /// Decode an integer, encoded as `i<base10 integer>e`.
 /// For example: `i123e`
-fn decode_int(comptime T: type, reader: *Reader) !T {
+fn decode_int(comptime T: type, r: *Reader, w: *Writer) !void {
     const Int = @typeInfo(T).int;
 
-    if (reader.buffer[reader.seek..].len < 3) {
+    if (r.buffer[r.seek..].len < 3) {
         return Error.MalformedBuffer;
     }
 
-    if (reader.buffer[reader.seek..][0] != 'i') {
+    if (r.buffer[r.seek..][0] != 'i') {
         return Error.MalformedBuffer;
     }
 
     const end = std.mem.find(
         u8,
-        reader.buffer[reader.seek..],
+        r.buffer[r.seek..],
         "e",
     ) orelse return Error.MalformedBuffer;
 
-    const data = reader.buffer[reader.seek .. reader.seek + end + 1];
+    const data = r.buffer[r.seek .. r.seek + end + 1];
 
     if (data[1] == '0' and data.len > 3) {
         return Error.LeadingZero;
@@ -372,15 +394,16 @@ fn decode_int(comptime T: type, reader: *Reader) !T {
         return Error.LeadingZero;
     }
 
-    const result = std.fmt.parseInt(
+    const result: T = std.fmt.parseInt(
         T,
         data[1 .. data.len - 1],
         10,
     ) catch |err| {
         return err;
     };
-    reader.toss(data.len - 1);
-    return result;
+
+    r.toss(data.len - 1);
+    try w.writeAll(std.mem.asBytes(&result));
 }
 
 /// Return the number of digits of a number.
@@ -529,7 +552,12 @@ test "decode_enum" {
     };
     const encoded = "i1e";
     var r = Reader.fixed(encoded);
-    const num = try decode(MyEnum, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(MyEnum, &r, &w);
+    const num: MyEnum = @enumFromInt(buff[0]);
+    // const num: *MyEnum = @ptrCast(@alignCast(&buff));
+    // try expect(num.* == .ExtHandshake);
     try expect(num == .ExtHandshake);
     try expect(r.seek == encoded.len - 1);
 }
@@ -540,8 +568,11 @@ test "decode_dict_1" {
     };
     const encoded = "d3:fooi3ee";
     var r = Reader.fixed(encoded);
-    const s = try decode(MyDict, &r);
-    try expect(s.foo == 3);
+    var buff: [@sizeOf(MyDict)]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(MyDict, &r, &w);
+    const s: *MyDict = @ptrCast(@alignCast(&buff));
+    try expect(s.*.foo == 3);
     try expect(r.seek == encoded.len - 1);
 }
 
@@ -550,11 +581,14 @@ test "decode_dict_2" {
         foo: u8,
         bar: u32,
         // todo: this is a list and not a string
-        zip: []const u8,
+        zip: [:0]u8,
     };
     const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
     var r = Reader.fixed(encoded);
-    const s = try decode(MyDict, &r);
+    var buff: [@sizeOf(MyDict)]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(MyDict, &r, &w);
+    const s: *MyDict = @ptrCast(@alignCast(&buff));
     try expect(s.foo == 3);
     try expect(s.bar == 321);
     try expect(std.mem.eql(u8, s.zip, "avocado"));
@@ -565,12 +599,15 @@ test "decode_dict_3" {
     const MyDict = struct {
         foo: u8,
         bar: u32,
-        zip: []const u8,
+        zip: [:0]u8,
         arr: [2]u8,
     };
     const encoded = "d3:fooi3e3:bari321e3:zip7:avocado3:arrli1ei2eee";
     var r = Reader.fixed(encoded);
-    const s = try decode(MyDict, &r);
+    var buff: [@sizeOf(MyDict)]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(MyDict, &r, &w);
+    const s: *MyDict = @ptrCast(@alignCast(&buff));
     try expect(s.foo == 3);
     try expect(s.bar == 321);
     try expect(std.mem.eql(u8, s.zip, "avocado"));
@@ -602,112 +639,119 @@ test "decode_dict_4" {
     try expect(r.seek == encoded.len - 1);
 }
 
-test "decode_dict_tuple" {
-    const encoded = "d3:fooi3e3:bari321e3:zip7:avocadoe";
-    var r = Reader.fixed(encoded);
-    const T = @Tuple(&.{ u8, u32, []const u8 });
-    const s: T = try decode(T, &r);
-    try expect(s[0] == 3);
-    try expect(s[1] == 321);
-    try expect(std.mem.eql(u8, s[2], "avocado"));
-    try expect(r.seek == encoded.len - 1);
-}
-
 test "decode_arr_u8_1" {
     const encoded = "li22ee";
     var r = Reader.fixed(encoded);
-    const s = try decode([1]u8, &r);
-    try expect(s[0] == 22);
-    try expect(s.len == 1);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([1]u8, &r, &w);
+    try expect(buff[0] == 22);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_arr_u8_2" {
     const encoded = "li22ei34ee";
     var r = Reader.fixed(encoded);
-    const s = try decode([2]u8, &r);
-    try expect(s[0] == 22);
-    try expect(s[1] == 34);
-    try expect(s.len == 2);
+    var buff: [2]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([2]u8, &r, &w);
+    try expect(buff[0] == 22);
+    try expect(buff[1] == 34);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_arr_u8_3" {
     const encoded = "lli1ei2ei3eeli4ei5ei6eeli7ei8ei9eee";
     var r = Reader.fixed(encoded);
-    const s = try decode([3][3]u8, &r);
-    try expect(s[0][0] == 1);
-    try expect(s[0][1] == 2);
-    try expect(s[0][2] == 3);
-    try expect(s[1][0] == 4);
-    try expect(s[1][1] == 5);
-    try expect(s[1][2] == 6);
-    try expect(s[2][0] == 7);
-    try expect(s[2][1] == 8);
-    try expect(s[2][2] == 9);
-    try expect(s[0].len == 3);
-    try expect(s[1].len == 3);
-    try expect(s[2].len == 3);
+    var buf: [3 * 3]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    const buff: *[3][3]u8 = @ptrCast(@alignCast(&buf));
+    try decode([3][3]u8, &r, &w);
+    try expect(buff[0][0] == 1);
+    try expect(buff[0][1] == 2);
+    try expect(buff[0][2] == 3);
+    try expect(buff[1][0] == 4);
+    try expect(buff[1][1] == 5);
+    try expect(buff[1][2] == 6);
+    try expect(buff[2][0] == 7);
+    try expect(buff[2][1] == 8);
+    try expect(buff[2][2] == 9);
+    try expect(buff[0].len == 3);
+    try expect(buff[1].len == 3);
+    try expect(buff[2].len == 3);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_arr_u32_1" {
     const encoded = "li123ei8888ee";
     var r = Reader.fixed(encoded);
-    const s = try decode([2]u32, &r);
-    try expect(s[0] == 123);
-    try expect(s[1] == 8888);
+    var buf: [8]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try decode([2]u32, &r, &w);
+    const buff: *[2]u32 = @ptrCast(@alignCast(&buf));
+    try expect(buff[0] == 123);
+    try expect(buff[1] == 8888);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_arr_str_1" {
     const encoded = "l3:vvve";
     var r = Reader.fixed(encoded);
-    const s = try decode([1][:0]u8, &r);
-    try expect(std.mem.eql(u8, s[0], "vvv"));
-    try expect(s.len == 1);
+    var buff: [3]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([1][:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, buff[0..3], "vvv"));
     try expect(r.seek == encoded.len - 1);
 }
 
-test "decod_arr_str_2" {
+test "decode_arr_str_2" {
     const encoded = "l3:vvv3:fooe";
     var r = Reader.fixed(encoded);
-    const s = try decode([2][:0]u8, &r);
-    try expect(std.mem.eql(u8, s[0], "vvv"));
-    try expect(std.mem.eql(u8, s[1], "foo"));
-    try expect(s.len == 2);
+    var buff: [6]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([2][:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, buff[0..3], "vvv"));
+    try expect(std.mem.eql(u8, buff[3..], "foo"));
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_str_1" {
     const encoded = "3:hih";
     var r = Reader.fixed(encoded);
-    const s = try decode([:0]u8, &r);
-    try expect(std.mem.eql(u8, s, "hih"));
+    var buff: [3]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, &buff, "hih"));
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_str_2" {
     const encoded = "10:hihhihhihh";
     var r = Reader.fixed(encoded);
-    const s = try decode([10:0]u8, &r);
-    try expect(std.mem.eql(u8, s, "hihhihhihh"));
+    var buff: [10]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([10:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, &buff, "hihhihhihh"));
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_empty_str" {
     const encoded = "0:";
     var r = Reader.fixed(encoded);
-    const s = try decode([:0]u8, &r);
-    try expect(std.mem.eql(u8, s, ""));
+    var buff: [0]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, &buff, ""));
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_empty_arr" {
     const encoded = "le";
     var r = Reader.fixed(encoded);
-    const s = decode([1][]const u8, &r);
-    try expect(s == Error.Empty);
+    var buff: [3]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const re = decode([0]u8, &r, &w);
+    try expect(re == Error.Empty);
     try expect(r.seek == encoded.len - 1);
 }
 
@@ -715,32 +759,44 @@ test "decode_empty_arr" {
 test "decode_u8" {
     const encoded = "i50e";
     var r = Reader.fixed(encoded);
-    const num = try decode(u8, &r);
-    try expect(num == 50);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(u8, &r, &w);
+    const num: *u8 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == 50);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_i8" {
     const encoded = "i-50e";
     var r = Reader.fixed(encoded);
-    const num = try decode(i8, &r);
-    try expect(num == -50);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(i8, &r, &w);
+    const num: *i8 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == -50);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_u16" {
     const encoded = "i65535e";
     var r = Reader.fixed(encoded);
-    const num = try decode(u16, &r);
-    try expect(num == 65_535);
+    var buff: [2]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(u16, &r, &w);
+    const num: *u16 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == 65_535);
     try expect(r.seek == encoded.len - 1);
 }
 
-test "decode_i16" {
+test "decode_i16_1" {
     const encoded = "i-32768e";
     var r = Reader.fixed(encoded);
-    const num = try decode(i16, &r);
-    try expect(num == -32_768);
+    var buff: [2]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(i16, &r, &w);
+    const num: *i16 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == -32_768);
     try expect(r.seek == encoded.len - 1);
 }
 
@@ -748,41 +804,55 @@ test "decode_i16" {
 test "decode_i16_2" {
     const encoded = "i32767e";
     var r = Reader.fixed(encoded);
-    const num = try decode(i16, &r);
-    try expect(num == 32_767);
+    var buff: [2]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(i16, &r, &w);
+    const num: *i16 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == 32_767);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_u32" {
     const encoded = "i4294967295e";
     var r = Reader.fixed(encoded);
-    const num = try decode(u32, &r);
-    try expect(num == 4_294_967_295);
+    var buff: [4]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(u32, &r, &w);
+    const num: *u32 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == 4_294_967_295);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_i32" {
     const encoded = "i-2147483648e";
     var r = Reader.fixed(encoded);
-    const num = try decode(i32, &r);
-    try expect(num == -2_147_483_648);
+    var buff: [4]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(i32, &r, &w);
+    const num: *i32 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == -2_147_483_648);
     try expect(r.seek == encoded.len - 1);
 }
 
 test "decode_zero" {
     const encoded = "i0e";
     var r = Reader.fixed(encoded);
-    const num = try decode(u8, &r);
-    try expect(num == 0);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode(u8, &r, &w);
+    const num: *u8 = @ptrCast(@alignCast(&buff));
+    try expect(num.* == 0);
     try expect(r.seek == encoded.len - 1);
 }
 
 // Test errors
 
-test "decode_leading_zero" {
+test "decode_leading_zero_1" {
     const encoded = "i02e";
     var r = Reader.fixed(encoded);
-    const err = decode(u8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(u8, &r, &w);
     try expect(err == Error.LeadingZero);
     try expect(r.seek == 0);
 }
@@ -790,7 +860,9 @@ test "decode_leading_zero" {
 test "decode_leading_zero_2" {
     const encoded = "i-0e";
     var r = Reader.fixed(encoded);
-    const err = decode(i8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(i8, &r, &w);
     try expect(err == Error.LeadingZero);
     try expect(r.seek == 0);
 }
@@ -798,7 +870,9 @@ test "decode_leading_zero_2" {
 test "decode_overflow_1" {
     const encoded = "i256e";
     var r = Reader.fixed(encoded);
-    const err = decode(u8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(u8, &r, &w);
     try expect(err == error.Overflow);
     try expect(r.seek == 0);
 }
@@ -806,7 +880,9 @@ test "decode_overflow_1" {
 test "decode_overflow_2" {
     const encoded = "i-296e";
     var r = Reader.fixed(encoded);
-    const err = decode(i8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(i8, &r, &w);
     try expect(err == error.Overflow);
     try expect(r.seek == 0);
 }
@@ -814,7 +890,9 @@ test "decode_overflow_2" {
 test "decode_non_int" {
     const encoded = "i12#e";
     var r = Reader.fixed(encoded);
-    const err = decode(i8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(i8, &r, &w);
     try expect(err == error.InvalidCharacter);
     try expect(r.seek == 0);
 }
@@ -822,7 +900,9 @@ test "decode_non_int" {
 test "decode_int_missing_e" {
     const encoded = "i12";
     var r = Reader.fixed(encoded);
-    const err = decode(i8, &r);
+    var buff: [1]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode(i8, &r, &w);
     try expect(err == Error.MalformedBuffer);
     try expect(r.seek == 0);
 }
@@ -831,15 +911,19 @@ test "decode_str_wrong_len" {
     // should ignore all the rest of the string
     const encoded = "2:higarbage";
     var r = Reader.fixed(encoded);
-    const s = try decode([]const u8, &r);
-    try expect(std.mem.eql(u8, s, "hi"));
+    var buff: [2]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    try decode([:0]u8, &r, &w);
+    try expect(std.mem.eql(u8, &buff, "hi"));
     try expect(r.seek == 3);
 }
 
 test "decode_str_no_len" {
     const encoded = ":hih";
     var r = Reader.fixed(encoded);
-    const err = decode([]const u8, &r);
+    var buff: [3]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode([:0]const u8, &r, &w);
     try expect(err == error.InvalidCharacter);
     try expect(r.seek == 0);
 }
@@ -847,7 +931,9 @@ test "decode_str_no_len" {
 test "decode_str_missing_colon" {
     const encoded = "10hihhihhihh";
     var r = Reader.fixed(encoded);
-    const err = decode([]const u8, &r);
+    var buff: [10]u8 = undefined;
+    var w = Writer.fixed(&buff);
+    const err = decode([:0]const u8, &r, &w);
     try expect(err == Error.MissingColon);
     try expect(r.seek == 0);
 }
@@ -885,5 +971,5 @@ test "decode_return" {
 }
 
 test "helpmegod" {
-    std.debug.print("{}\n", .{@typeInfo([2:0]u8)});
+    std.debug.print("{}\n", .{@typeInfo([1][]const u8)});
 }
