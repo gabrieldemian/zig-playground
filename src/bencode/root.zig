@@ -152,12 +152,13 @@ fn Decode_Return(comptime T: type) type {
             // [n]u8
             // [n:0]u8
             if (arr.child == u8) return []u8;
+
             return switch (@typeInfo(arr.child)) {
                 inline .pointer => |ptr| {
                     // list of strings
                     // [2][:0]u8
-                    if (ptr.sentinel() == 0 and ptr.child == u8)
-                        return [arr.len][]u8;
+                    if (ptr.child == u8) return [arr.len][]u8;
+
                     // [2]T
                     return T;
                 },
@@ -853,6 +854,7 @@ test "decode_str_missing_colon" {
 
 test "decode_return" {
     const types = comptime [_]type{
+        [1][]u8,
         []u8,
         []const u8,
         [:0]u8,
@@ -865,6 +867,7 @@ test "decode_return" {
         [2]u32,
     };
     const outputs = comptime [_]type{
+        [1][]u8,
         []u8,
         []u8,
         []u8,
